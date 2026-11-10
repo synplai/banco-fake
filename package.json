@@ -1,0 +1,24 @@
+{
+  "name": "banco-feira",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev": "node --watch --env-file-if-exists=.env server/index.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "5.1.0",
+    "jsqr": "1.4.0",
+    "mqtt": "5.14.1",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.3"
+  }
+}
