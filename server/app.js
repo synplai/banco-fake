@@ -219,6 +219,18 @@ export async function createApp(db, config = process.env) {
     });
     res.status(id ? 200 : 201).json({ ok: true });
   });
+  api.post('/admin/devices/:id/delete', async (req, res) => {
+    manager(req);
+    const { id } = req.params;
+    await transaction(db, async db => {
+      check(await get(db, 'SELECT 1 FROM devices WHERE id=?', id), 'Maquininha não encontrada.', 404);
+      await run(db, `UPDATE operations SET device=NULL,
+        status=CASE WHEN status='pending' THEN 'cancelled' ELSE status END
+        WHERE device=?`, id);
+      await run(db, 'DELETE FROM devices WHERE id=?', id);
+    });
+    res.json({ ok: true });
+  });
   api.post('/admin/:collection/:id/delete', async (req, res) => {
     manager(req);
     const { collection, id } = req.params;

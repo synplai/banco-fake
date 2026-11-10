@@ -186,7 +186,8 @@ function adminPage() {
         pill(d.online ? 'Online' : 'Offline', d.online ? 'good' : 'neutral') +
         button('Renomear', 'device-name', 'edit', 'ghost', d.id) +
         (d.team ? button('Desvincular', 'device-unlink', null, 'danger-ghost', d.id) :
-          button('Vincular', 'device-link', 'device', 'ghost', d.id)))).join('') +
+          button('Vincular', 'device-link', 'device', 'ghost', d.id)) +
+        button('Excluir', 'device-delete', 'trash', 'danger-ghost', d.id))).join('') +
       '</div>' : empty('Nenhuma maquininha registrada', 'Cadastre o ESP32 para disponibilizá-lo na lista.', 'device'), pill(mqtt ? 'MQTT conectado' : 'MQTT indisponível', mqtt ? 'good' : 'neutral'));
 }
 function record(title, subtitle, type, actions) {
@@ -771,6 +772,16 @@ document.addEventListener('click', async e => {
         showDialog('Renomear maquininha', 'Escolha um nome fácil de reconhecer na lista.', form(
           input('Nome da maquininha', 'name', 'maxlength="50" value="' + esc(device.name) + '"'), 'Salvar nome'));
         onForm(data => complete('/admin/devices/' + id + '/edit', data, 'Nome atualizado.'));
+        break;
+      }
+      case 'device-delete': {
+        const device = devices.find(item => item.id === id);
+        if (!device) break;
+        const unlink = device.teamName ? '<p>O vínculo com <strong>' + esc(device.teamName) + '</strong> será removido.</p>' : '';
+        showDialog('Excluir maquininha', device.name, form(unlink +
+          '<p>As cobranças e os cadastros de cartão em andamento nesta maquininha serão cancelados. O histórico de pagamentos será preservado.</p>',
+          'Excluir maquininha', 'danger'));
+        onForm(() => complete('/admin/devices/' + id + '/delete', {}, 'Maquininha excluída.'));
         break;
       }
       case 'sale': saleDialog(teams.find(x => x.id === id)); break;

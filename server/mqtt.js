@@ -14,7 +14,7 @@ export function bridge(db, config, changed) {
   }) : null;
   let ready = false;
   const send = (device, op) => {
-    if (!ready) return;
+    if (!ready || !device) return;
     const expires = String(Math.floor(op.expires / 1000));
     client.publish(topic + '/' + device.id + '/arm', JSON.stringify({
       op: op.id, expires, sig: signature(device.key, 'arm', device.id, op.id, expires)
@@ -26,17 +26,17 @@ export function bridge(db, config, changed) {
     if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) return;
     if (type === 'hello' ? (op !== '' || card !== '') :
       (type !== 'tap' || !/^[a-f0-9-]{36}$/.test(op) || !/^(?:[A-F0-9]{8}|[A-F0-9]{14}|[A-F0-9]{20})$/.test(card))) return;
-    const device = await get(db, 'SELECT * FROM devices WHERE id=?', id);
-    if (!device || !timingSafeEqual(Buffer.from(sig, 'hex'),
-      Buffer.from(signature(device.key, type, id, nonce, op, card), 'hex'))) return;
-    const active = await transaction(db, async db => {
+    const result = await transaction(db, async db => {
+      const device = await get(db, 'SELECT * FROM devices WHERE id=?', id);
+      if (!device || !timingSafeEqual(Buffer.from(sig, 'hex'),
+        Buffer.from(signature(device.key, type, id, nonce, op, card), 'hex'))) return;
       await expire(db);
       await run(db, 'UPDATE devices SET seen=? WHERE id=?', Date.now(), id);
       const current = await get(db, "SELECT * FROM operations WHERE device=? AND status='pending'", id);
-      if (type === 'hello') return current;
-      if (!current || current.id !== op) return;
+      if (type === 'hello') return { device, active: current };
+      if (!current || current.id !== op) return { device };
       const event = await run(db, 'INSERT INTO tap_events VALUES (?,?,?) ON CONFLICT DO NOTHING', id, nonce, Date.now());
-      if (!event.changes) return;
+      if (!event.changes) return { device };
       await run(db, 'DELETE FROM tap_events WHERE created<?', Date.now() - 86400000);
       try {
         if (current.kind === 'card') {
@@ -53,7 +53,10 @@ export function bridge(db, config, changed) {
         if (!(error instanceof Rule)) throw error;
         await run(db, 'UPDATE operations SET detail=? WHERE id=?', error.message, current.id);
       }
+      return { device };
     });
+    if (!result) return;
+    const { device, active } = result;
     if (type === 'hello' && ready) {
       const time = String(Math.floor(Date.now() / 1000));
       client.publish(topic + '/' + device.id + '/status', JSON.stringify({

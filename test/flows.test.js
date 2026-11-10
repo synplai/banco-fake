@@ -213,6 +213,10 @@ test('maquininhas são listadas, nomeadas e vinculadas sem digitar códigos', as
   await admin('/admin/devices/' + device.id + '/link', { team: other.id });
   assert.equal((await second.request('/home')).teams[0].device.id, device.id);
   assert.equal((await admin('/home')).devices.find(item => item.id === device.id).team, other.id);
+  await admin('/admin/devices/' + spare.id + '/delete', {});
+  await admin('/admin/devices/' + spare.id + '/delete', {}, 404);
+  assert.ok(!(await admin('/home')).devices.some(item => item.id === spare.id));
+  await second.request('/teams/' + other.id + '/device', { device: spare.id }, 404);
 });
 
 test('Pix independente de MQTT, QR Code, autorização, SSE e pagamento idempotente', async t => {
@@ -468,8 +472,21 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   assert.equal((await buyer.request('/home')).user.balance, 3500);
   assert.equal((await seller.request('/home')).teams[0].balance, 4000);
   const cancelled = await seller.request(salePath, { amount: 500, method: 'rfid' }, 201);
-  await admin('/admin/devices/' + device.id + '/unlink', {});
+  const remove = '/admin/devices/' + device.id + '/delete';
+  await seller.request(remove, {}, 403);
+  await admin(remove, {});
   await send('tap', cancelled.id, card);
-  assert.equal((await seller.request('/home')).teams[0].sale.status, 'cancelled');
-  assert.equal((await buyer.request('/home')).user.balance, 3500);
+  const { teams: [sellerTeam], devices } = await seller.request('/home');
+  assert.equal(sellerTeam.sale.status, 'cancelled');
+  assert.equal(sellerTeam.device, null);
+  assert.ok(!devices.some(item => item.id === device.id));
+  assert.equal((await seller.request('/activity/' + sale.id)).id, sale.id);
+  const { user } = await buyer.request('/home');
+  assert.equal(user.balance, 3500);
+  assert.equal(user.hasCard, 1);
+  await admin('/admin/devices', { ...registration, deviceKey: randomBytes(32).toString('hex') }, 201);
+  await admin('/admin/devices/' + device.id + '/link', { team: team.id });
+  await send('hello');
+  await delay(60);
+  assert.equal((await admin('/home')).devices[0].online, false);
 });
