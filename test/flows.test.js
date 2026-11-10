@@ -181,6 +181,79 @@ test('exclusão revoga o acesso e libera vínculos, preservando o histórico', a
   await replacement.request('/teams/' + newTeam.id + '/device', { pairing });
 });
 
+test('gestor zera os saldos e exclui alunos ou estabelecimentos em lote', async t => {
+  const { admin, students, team, credit, session } = await setup({}, t, 1);
+  const [seller, buyer] = students;
+  const device = await admin('/admin/devices', { name: 'Terminal da turma' }, 201);
+  await admin('/admin/devices/' + device.id + '/link', { team: team.id });
+  const bank = (await admin('/home')).user;
+  const bankDevice = await admin('/admin/devices', { name: 'Terminal do banco' }, 201);
+  await admin('/admin/devices/' + bankDevice.id + '/link', { team: bank.id });
+  await credit(team.id, 1000);
+  await credit(buyer.id, 2000);
+  await admin('/bank/charges', { team: team.id, type: 'fixed', value: 100, description: 'Taxa de teste', request: randomBytes(16).toString('hex') }, 201);
+  const [charge] = (await seller.request('/home')).teams[0].charges;
+  await seller.request('/bank/charges/' + charge.id + '/pay', {});
+  const salePath = '/teams/' + team.id + '/sales';
+  const pending = await seller.request(salePath, { amount: 100, method: 'pix' }, 201);
+  await buyer.request('/admin/balances/reset', {}, 403);
+  await buyer.request('/admin/students/delete-all', {}, 403);
+  await buyer.request('/admin/teams/delete-all', {}, 403);
+  assert.equal((await admin('/admin/balances/reset', {})).count, 3);
+  assert.equal((await admin('/admin/balances/reset', {})).count, 0);
+  const reset = await admin('/home');
+  assert.equal(reset.user.balance, 0);
+  assert.ok(reset.accounts.every(account => account.balance === 0));
+  assert.ok(reset.activity.some(entry => entry.id === charge.id));
+
+  assert.equal((await admin('/admin/teams/delete-all', {})).count, 1);
+  assert.equal((await admin('/admin/teams/delete-all', {})).count, 0);
+  await buyer.request('/pix/' + pending.id, {}, 409);
+  const afterTeams = await admin('/home');
+  assert.equal(afterTeams.accounts.length, students.length);
+  assert.equal(afterTeams.devices.find(item => item.id === device.id).team, null);
+  assert.equal(afterTeams.devices.find(item => item.id === bankDevice.id).team, bank.id);
+
+  await admin('/admin/teams', { name: team.name, cnpj: team.cnpj, members: [seller.id] }, 201);
+  const [newTeam] = (await seller.request('/home')).teams;
+  const sale = await seller.request('/teams/' + newTeam.id + '/sales', { amount: 100, method: 'pix' }, 201);
+  assert.equal((await admin('/admin/students/delete-all', {})).count, students.length);
+  assert.equal((await admin('/admin/students/delete-all', {})).count, 0);
+  await seller.request('/home', undefined, 401);
+  await session()('/login', { username: 'aluno1', password: 'AlunoTeste2026' }, 401);
+  const final = await admin('/home');
+  assert.deepEqual(final.accounts.map(account => account.id), [newTeam.id]);
+  assert.deepEqual(final.members, []);
+  assert.ok(final.activity.some(entry => entry.id === charge.id));
+  await admin('/pix/' + sale.id, {}, 409);
+  await admin('/admin/students', { name: 'Novo aluno', username: 'aluno1', password: 'AlunoNovo2026' }, 201);
+});
+
+test('zerar histórico limpa os extratos e saldos de todas as contas', async t => {
+  const { admin, students: [seller, buyer], team, credit } = await setup({}, t, 1);
+  const request = randomBytes(16).toString('hex');
+  await credit(buyer.id, 1000, request);
+  const sale = await seller.request('/teams/' + team.id + '/sales', { amount: 500, method: 'pix' }, 201);
+  await buyer.request('/pix/' + sale.id, {});
+  await admin('/bank/charges', { team: team.id, type: 'fixed', value: 100, description: 'Taxa de teste', request: randomBytes(16).toString('hex') }, 201);
+  const [charge] = (await seller.request('/home')).teams[0].charges;
+  await seller.request('/bank/charges/' + charge.id + '/pay', {});
+  await buyer.request('/admin/history/reset', {}, 403);
+  await admin('/admin/history/reset', {});
+  const home = await admin('/home');
+  assert.equal(home.user.balance, 0);
+  assert.ok(home.accounts.every(account => account.balance === 0));
+  assert.deepEqual(home.activity, []);
+  assert.deepEqual((await buyer.request('/home')).activity, []);
+  assert.deepEqual((await seller.request('/home')).teams[0].activity, []);
+  assert.equal((await admin('/activity/' + sale.id)).amount, 500);
+  await credit(buyer.id, 1000, request);
+  assert.equal((await buyer.request('/home')).user.balance, 0);
+  await credit(buyer.id, 100);
+  assert.equal((await buyer.request('/home')).activity[0].amount, 100);
+  assert.equal((await admin('/home')).activity.length, 1);
+});
+
 test('maquininhas são listadas, nomeadas e vinculadas sem digitar códigos', async t => {
   const { admin, students, team } = await setup({}, t, 1);
   const [seller, second, outsider] = students;
@@ -458,7 +531,7 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await once(listener, 'listening');
   const url = 'mqtt://127.0.0.1:' + listener.address().port;
   const { admin, students, team, credit } = await setup({ MQTT_URL: url }, t);
-  const [seller, second, , buyer] = students;
+  const [seller, second, third, buyer] = students;
   const registration = { name: 'RC522 de teste', deviceId: '5831', deviceKey: randomBytes(32).toString('hex') };
   await buyer.request('/admin/devices', registration, 403);
   await admin('/admin/devices', { ...registration, deviceKey: '1234' }, 400);
@@ -511,6 +584,25 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await send('tap', duplicate.id, card);
   await eventually(async () => (await second.request('/home')).card.detail?.includes('outra conta'));
   await second.request('/card/' + duplicate.id + '/cancel', {});
+
+  const bankId = (await admin('/home')).user.id;
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  await admin('/admin/devices/' + device.id + '/link', { team: bankId });
+  assert.equal((await admin('/home')).devices[0].ownerRole, 'admin');
+  const enrollmentPath = '/admin/students/' + third.id + '/card';
+  await seller.request(enrollmentPath, {}, 403);
+  await third.request('/card', { device: device.id }, 400);
+  const abandoned = await admin(enrollmentPath, {}, 201);
+  await admin('/card/' + abandoned.id + '/cancel', {});
+  assert.equal((await admin('/home')).cardEnrollment.status, 'cancelled');
+  const bankEnrollment = await admin(enrollmentPath, {}, 201);
+  await eventually(() => armed?.op === bankEnrollment.id);
+  await admin('/admin/students/' + second.id + '/card', {}, 409);
+  await send('tap', bankEnrollment.id, 'A1B2C3D4');
+  await eventually(async () => (await admin('/home')).cardEnrollment.status === 'linked');
+  assert.equal((await third.request('/home')).user.hasCard, 1);
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  await admin('/admin/devices/' + device.id + '/link', { team: team.id });
 
   assert.equal((await admin('/home')).terminalFeeRate, 0);
   await seller.request('/bank/terminal-fee', { rate: 1000 }, 403);

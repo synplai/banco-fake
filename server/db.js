@@ -52,7 +52,7 @@ const schema = `
       owner TEXT NOT NULL REFERENCES accounts(id), device TEXT REFERENCES devices(id),
       method TEXT NOT NULL, amount BIGINT NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending', detail TEXT,
-      created BIGINT NOT NULL, expires BIGINT NOT NULL
+      created BIGINT NOT NULL, expires BIGINT NOT NULL, actor TEXT REFERENCES accounts(id)
     );
     CREATE UNIQUE INDEX IF NOT EXISTS one_device_operation ON operations(device)
       WHERE status = 'pending' AND device IS NOT NULL;
@@ -63,7 +63,7 @@ const schema = `
     CREATE TABLE IF NOT EXISTS ledger (
       id TEXT PRIMARY KEY, payer TEXT REFERENCES accounts(id), payee TEXT NOT NULL REFERENCES accounts(id),
       amount BIGINT NOT NULL CHECK(amount > 0), method TEXT NOT NULL,
-      created BIGINT NOT NULL, actor TEXT REFERENCES accounts(id), request TEXT UNIQUE
+      created BIGINT NOT NULL, actor TEXT REFERENCES accounts(id), request TEXT UNIQUE, archived_at BIGINT
     );
     CREATE INDEX IF NOT EXISTS ledger_payer ON ledger(payer,created);
     CREATE INDEX IF NOT EXISTS ledger_payee ON ledger(payee,created);
@@ -118,6 +118,12 @@ export async function openDb(file, connectionString) {
     exec(schema);
     if (!sqlite.prepare('PRAGMA table_info(accounts)').all().some(column => column.name === 'deleted_at')) {
       exec('ALTER TABLE accounts ADD COLUMN deleted_at BIGINT');
+    }
+    if (!sqlite.prepare('PRAGMA table_info(operations)').all().some(column => column.name === 'actor')) {
+      exec('ALTER TABLE operations ADD COLUMN actor TEXT REFERENCES accounts(id)');
+    }
+    if (!sqlite.prepare('PRAGMA table_info(ledger)').all().some(column => column.name === 'archived_at')) {
+      exec('ALTER TABLE ledger ADD COLUMN archived_at BIGINT');
     }
   });
   const connection = {
@@ -178,6 +184,8 @@ async function openPostgres(connectionString) {
     await postgresTransaction(async (_, exec) => {
       await exec(schema);
       await exec('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
+      await exec('ALTER TABLE operations ADD COLUMN IF NOT EXISTS actor TEXT REFERENCES accounts(id)');
+      await exec('ALTER TABLE ledger ADD COLUMN IF NOT EXISTS archived_at BIGINT');
     });
   } catch (error) {
     await pool.end();
@@ -210,7 +218,8 @@ export async function transfer(db, { id = uid(), payer = null, payee, amount, me
     requireRule(debit.changes, 'Saldo insuficiente.', 409);
   }
   await run(db, 'UPDATE accounts SET balance=balance+? WHERE id=?', amount, payee);
-  await run(db, 'INSERT INTO ledger VALUES (?,?,?,?,?,?,?,?)', id, payer, payee, amount, method, Date.now(), actor, request);
+  await run(db, 'INSERT INTO ledger (id,payer,payee,amount,method,created,actor,request) VALUES (?,?,?,?,?,?,?,?)',
+    id, payer, payee, amount, method, Date.now(), actor, request);
 }
 export async function settle(db, op, payer, method, actor = payer) {
   requireRule(op.status === 'pending' && op.method === method, 'Esta cobrança não está disponível.', 409);
@@ -230,7 +239,7 @@ export async function settle(db, op, payer, method, actor = payer) {
 export function activity(db, account) {
   return all(db, `SELECT l.id,l.amount,l.method,l.created,l.payer,l.payee,p.name AS "fromName",r.name AS "toName"
     FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee
-    WHERE l.payer=? OR l.payee=? ORDER BY l.created DESC LIMIT 40`, account, account);
+    WHERE l.archived_at IS NULL AND (l.payer=? OR l.payee=?) ORDER BY l.created DESC LIMIT 40`, account, account);
 }
 export function initAdmin(db, username, password) {
   return transaction(db, async db => {

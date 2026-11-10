@@ -13,7 +13,7 @@ const scanner = fileURLToPath(new URL('../node_modules/jsqr/dist/jsQR.js', impor
 const login = /^[a-z0-9._-]{3,40}$/;
 const normalize = value => typeof value === 'string' ? value.trim() : '';
 const userFields = 'id,name,role,username,cnpj,balance,CAST(card IS NOT NULL AS INTEGER) AS "hasCard"';
-const deviceFields = 'd.id,d.name,d.team,d.seen,a.name AS "teamName"';
+const deviceFields = 'd.id,d.name,d.team,d.seen,a.name AS "teamName",a.role AS "ownerRole"';
 const publicDevice = d => ({ ...d, online: d.seen >= deviceOnlineSince() });
 const defaultDeviceName = id => 'Maquininha ' + id;
 
@@ -161,9 +161,13 @@ export async function createApp(db, config = process.env) {
       const members = await all(db, 'SELECT team,student FROM members');
       return res.json({ user, accounts, members, devices: await devices(), availableDevices: await availableDevices(), mqtt: mqtt.ready(),
         terminalFeeRate: await terminalFeeRate(db),
+        cardEnrollment: await get(db, `SELECT id,owner,status,detail FROM operations
+          WHERE actor=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1`, user.id) || null,
         charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
         activity: await all(db,
-        'SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName" FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
+        `SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName"
+         FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee
+         WHERE l.archived_at IS NULL ORDER BY l.created DESC LIMIT 40`) });
     }
     const teams = await all(db, 'SELECT a.id,a.name,a.cnpj,a.balance FROM accounts a JOIN members m ON a.id=m.team WHERE m.student=?', user.id);
     for (const team of teams) {
@@ -241,31 +245,60 @@ export async function createApp(db, config = process.env) {
     });
     res.json({ ok: true });
   });
+  function deletableRole(collection) {
+    check(collection === 'students' || collection === 'teams', 'Cadastro não encontrado.', 404);
+    return collection === 'students' ? 'student' : 'team';
+  }
+  async function deleteAccount(db, id, role) {
+    await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND status='pending'", id);
+    if (role === 'student') {
+      const membership = await get(db, 'SELECT team FROM members WHERE student=?', id);
+      await run(db, 'DELETE FROM members WHERE student=?', id);
+      if (membership && !await get(db, 'SELECT 1 FROM members WHERE team=?', membership.team)) {
+        await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='sale' AND status='pending'", membership.team);
+      }
+    } else {
+      await run(db, 'DELETE FROM members WHERE team=?', id);
+      await run(db, 'UPDATE bank_charges SET cancelled_at=? WHERE team=? AND paid_at IS NULL AND cancelled_at IS NULL', Date.now(), id);
+      await run(db, "UPDATE operations SET status='cancelled' WHERE status='pending' AND device IN (SELECT id FROM devices WHERE team=?)", id);
+      await run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE team=?', id);
+    }
+    await run(db, 'DELETE FROM sessions WHERE account=?', id);
+    await run(db, 'DELETE FROM pix_keys WHERE account=?', id);
+    await run(db, 'UPDATE accounts SET deleted_at=?,username=NULL,password=NULL,cnpj=NULL,card=NULL WHERE id=?', Date.now(), id);
+  }
   api.post('/admin/:collection/:id/delete', async (req, res) => {
     manager(req);
-    const { collection, id } = req.params;
-    check(collection === 'students' || collection === 'teams', 'Cadastro não encontrado.', 404);
-    const role = collection === 'students' ? 'student' : 'team';
+    const { id, collection } = req.params;
+    const role = deletableRole(collection);
     await transaction(db, async db => {
       const account = await get(db, 'SELECT deleted_at FROM accounts WHERE id=? AND role=?', id, role);
       check(account, 'Cadastro não encontrado.', 404);
-      if (account.deleted_at !== null) return;
-      await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND status='pending'", id);
-      if (role === 'student') {
-        const membership = await get(db, 'SELECT team FROM members WHERE student=?', id);
-        await run(db, 'DELETE FROM members WHERE student=?', id);
-        if (membership && !await get(db, 'SELECT 1 FROM members WHERE team=?', membership.team)) {
-          await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='sale' AND status='pending'", membership.team);
-        }
-      } else {
-        await run(db, 'DELETE FROM members WHERE team=?', id);
-        await run(db, 'UPDATE bank_charges SET cancelled_at=? WHERE team=? AND paid_at IS NULL AND cancelled_at IS NULL', Date.now(), id);
-        await run(db, "UPDATE operations SET status='cancelled' WHERE status='pending' AND device IN (SELECT id FROM devices WHERE team=?)", id);
-        await run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE team=?', id);
-      }
-      await run(db, 'DELETE FROM sessions WHERE account=?', id);
-      await run(db, 'DELETE FROM pix_keys WHERE account=?', id);
-      await run(db, 'UPDATE accounts SET deleted_at=?,username=NULL,password=NULL,cnpj=NULL,card=NULL WHERE id=?', Date.now(), id);
+      if (account.deleted_at === null) await deleteAccount(db, id, role);
+    });
+    res.json({ ok: true });
+  });
+  api.post('/admin/:collection/delete-all', async (req, res) => {
+    manager(req);
+    const role = deletableRole(req.params.collection);
+    const count = await transaction(db, async db => {
+      const accounts = await all(db, 'SELECT id FROM accounts WHERE role=? AND deleted_at IS NULL', role);
+      for (const account of accounts) await deleteAccount(db, account.id, role);
+      return accounts.length;
+    });
+    res.json({ ok: true, count });
+  });
+  const resetBalances = db => run(db, 'UPDATE accounts SET balance=0 WHERE deleted_at IS NULL AND balance>0');
+  api.post('/admin/balances/reset', async (req, res) => {
+    manager(req);
+    const { changes } = await resetBalances(db);
+    res.json({ ok: true, count: Number(changes) });
+  });
+  api.post('/admin/history/reset', async (req, res) => {
+    manager(req);
+    await transaction(db, async db => {
+      await resetBalances(db);
+      await run(db, 'UPDATE ledger SET archived_at=? WHERE archived_at IS NULL', Date.now());
     });
     res.json({ ok: true });
   });
@@ -407,20 +440,20 @@ export async function createApp(db, config = process.env) {
     });
     res.json({ pairing });
   });
-  async function linkDevice(db, team, id) {
-    check(typeof team === 'string' && typeof id === 'string', 'Selecione o estabelecimento e a maquininha.');
-    check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", team),
-      'Estabelecimento não encontrado.', 404);
+  async function linkDevice(db, owner, id, bank = null) {
+    check(typeof owner === 'string' && typeof id === 'string', 'Selecione a conta e a maquininha.');
+    check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND (role='team' OR (role='admin' AND id=?)) AND deleted_at IS NULL", owner, bank),
+      'Conta não encontrada.', 404);
     const device = await get(db, 'SELECT team FROM devices WHERE id=?', id);
-    if (device?.team === team) return;
-    check(!device?.team, 'Esta maquininha já está vinculada a outro estabelecimento.', 409);
+    if (device?.team === owner) return;
+    check(!device?.team, 'Esta maquininha já está vinculada a outra conta.', 409);
     if (!device) await registerDiscoveredDevice(db, id);
-    check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
-    await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE id=?', team, id);
+    check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', owner), 'Esta conta já tem uma maquininha.', 409);
+    await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE id=?', owner, id);
   }
   api.post('/admin/devices/:id/link', async (req, res) => {
     manager(req);
-    await transaction(db, db => linkDevice(db, req.body.team, req.params.id));
+    await transaction(db, db => linkDevice(db, req.body.team, req.params.id, req.user.id));
     res.json({ ok: true });
   });
   api.post('/admin/devices/:id/unlink', async (req, res) => {
@@ -464,36 +497,53 @@ export async function createApp(db, config = process.env) {
     res.json({ ok: true });
   });
 
-  async function reserve(db, deviceId) {
+  async function reserve(db, deviceId, ownerRole = 'team') {
     check(mqtt.ready(), 'MQTT indisponível. Verifique a conexão da maquininha.');
-    const device = await get(db, 'SELECT * FROM devices WHERE id=? AND team IS NOT NULL', deviceId);
+    const device = await get(db, 'SELECT d.id,d.seen FROM devices d JOIN accounts a ON a.id=d.team WHERE d.id=? AND a.role=?', deviceId, ownerRole);
     check(device && device.seen >= deviceOnlineSince(), 'A maquininha está offline.');
     check(!await get(db, "SELECT 1 FROM operations WHERE device=? AND status='pending'", device.id), 'Maquininha ocupada.', 409);
     return device.id;
   }
-  async function startOperation(db, { kind, owner, device, method, cents = 0, minutes }) {
+  async function startOperation(db, { kind, owner, device, method, cents = 0, minutes, actor = null }) {
     const id = uid();
-    await run(db, 'INSERT INTO operations (id,kind,owner,device,method,amount,created,expires) VALUES (?,?,?,?,?,?,?,?)',
-      id, kind, owner, device, method, cents, Date.now(), deadline(minutes));
+    await run(db, 'INSERT INTO operations (id,kind,owner,device,method,amount,created,expires,actor) VALUES (?,?,?,?,?,?,?,?,?)',
+      id, kind, owner, device, method, cents, Date.now(), deadline(minutes), actor);
     return operation(db, id);
+  }
+  async function startCardEnrollment(db, owner, deviceId, actor = null) {
+    await expire(db);
+    check(!await get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='card' AND status='pending'", owner),
+      'Já existe um vínculo de cartão em andamento para este aluno.', 409);
+    const device = await reserve(db, deviceId, actor ? 'admin' : 'team');
+    return startOperation(db, { kind: 'card', owner, device, method: 'rfid', minutes: 1, actor });
   }
   api.post('/card', async (req, res) => {
     student(req);
     check(typeof req.body.device === 'string', 'Escolha uma maquininha.');
     const op = await transaction(db, async db => {
-      await expire(db);
       check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND deleted_at IS NULL', req.user.id),
         'Entre na sua conta para continuar.', 401);
-      check(!await get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='card' AND status='pending'", req.user.id),
-        'Você já tem um vínculo em andamento.', 409);
-      return startOperation(db, { kind: 'card', owner: req.user.id, device: await reserve(db, req.body.device), method: 'rfid', minutes: 1 });
+      return startCardEnrollment(db, req.user.id, req.body.device);
+    });
+    await mqtt.arm(op);
+    res.status(201).json(op);
+  });
+  api.post('/admin/students/:id/card', async (req, res) => {
+    manager(req);
+    const op = await transaction(db, async db => {
+      const owner = req.params.id;
+      check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", owner), 'Aluno não encontrado.', 404);
+      const device = await get(db, 'SELECT id FROM devices WHERE team=?', req.user.id);
+      check(device, 'Vincule a maquininha à conta do banco primeiro.', 409);
+      return startCardEnrollment(db, owner, device.id, req.user.id);
     });
     await mqtt.arm(op);
     res.status(201).json(op);
   });
   api.post('/card/:id/cancel', async (req, res) => {
-    student(req);
-    await run(db, "UPDATE operations SET status='cancelled' WHERE id=? AND owner=? AND kind='card' AND status='pending'", req.params.id, req.user.id);
+    if (req.user.role !== 'admin') student(req);
+    const accountField = req.user.role === 'admin' ? 'actor' : 'owner';
+    await run(db, `UPDATE operations SET status='cancelled' WHERE id=? AND ${accountField}=? AND kind='card' AND status='pending'`, req.params.id, req.user.id);
     res.json({ ok: true });
   });
   api.post('/teams/:team/sales', async (req, res) => {

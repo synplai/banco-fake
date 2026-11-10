@@ -152,9 +152,10 @@ const intro = (eyebrow, title, subtitle, right = '') => '<div class="intro"><div
 const metrics = (label, value, description, type, style) => '<div class="metric"><span class="tile-icon ' + style + '">' + icon(type) + '</span><span>' + label + '</span><strong>' + value + '</strong><small>' + description + '</small></div>';
 const percentText = rate => (rate / 100).toLocaleString('pt-BR');
 function adminPage() {
-  const { accounts, members, devices, availableDevices, mqtt, charges, terminalFeeRate, activity: rows } = state.data;
+  const { user, accounts, members, devices, availableDevices, mqtt, charges, terminalFeeRate, cardEnrollment, activity: rows } = state.data;
   const students = accounts.filter(x => x.role === 'student');
   const teams = accounts.filter(x => x.role === 'team');
+  const bankDevice = devices.find(device => device.team === user.id);
   if (state.page === 'overview') {
     return intro('PAINEL DO GESTOR', 'Visão geral do banco', 'Acompanhe contas, estabelecimentos e pagamentos em um só lugar.', button('Liberar saldo', 'credit', 'plus')) +
       '<div class="hero admin-hero"><div><span class="eyebrow"><i></i> BANCO VIRTUAL</span><h2>Dinheiro de brincadeira.<br>Aprendizado de verdade.</h2><p>Cadastre alunos, organize os estabelecimentos e dê início às vendas.</p></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div><span class="hero-index">01 &nbsp; / &nbsp; SIMULAÇÃO</span></div>' +
@@ -164,16 +165,23 @@ function adminPage() {
       metrics('Saldo em circulação', money(accounts.reduce((sum, x) => sum + x.balance, state.data.user.balance)), 'Total nas contas ativas', 'card', 'blue') + '</div>' +
       section('Conta do banco', 'Saldo disponível · ' + money(state.data.user.balance),
         '<div class="panel-actions pix-actions">' + button('Enviar Pix', 'pix-send', 'up', 'ghost') +
-        button('Pagar cobrança', 'pix', 'pix', 'ghost') + button('Minhas chaves Pix', 'pix-keys', null, 'ghost') + '</div>') +
-      section('Movimentações recentes', 'Créditos e pagamentos de todas as contas', activity(rows), pill('Simulação', 'neutral'));
+        button('Pagar cobrança', 'pix', 'pix', 'ghost') + button('Minhas chaves Pix', 'pix-keys', null, 'ghost') +
+        button('Maquininha do banco', 'pair', 'device', 'ghost', user.id) + '</div>') +
+      section('Administração da turma', 'Gerencie os saldos e os cadastros da atividade.',
+        '<div class="panel-actions pix-actions">' + button('Zerar todos os saldos', 'reset-balances', null, 'danger-ghost') +
+        button('Excluir todos os alunos', 'delete-all', 'trash', 'danger-ghost', 'students') +
+        button('Excluir todos os estabelecimentos', 'delete-all', 'trash', 'danger-ghost', 'teams') + '</div>') +
+      section('Movimentações recentes', 'Créditos e pagamentos de todas as contas', activity(rows),
+        button('Zerar histórico e saldos', 'reset-history', 'trash', 'danger-ghost'));
   }
   if (state.page === 'students') return intro('CADASTROS', 'Alunos', 'Veja quem já vinculou o cartão e gerencie as contas.', button('Cadastrar aluno', 'student', 'plus')) +
+    bankCardPanel(bankDevice, cardEnrollment, students, user.id) +
     section('Contas pessoais', students.length + ' aluno(s) · ' + students.filter(x => !x.hasCard).length + ' sem cartão', students.length ?
       '<div class="records">' + students.map(x => record(x.name, '@' + x.username, 'users', pill(x.hasCard ? 'Com cartão' : 'Sem cartão', x.hasCard ? 'good' : 'neutral') +
       '<b>' + money(x.balance) + '</b>' + button('Crédito', 'credit', 'plus', 'ghost', x.id) +
       button('Editar', 'student', 'edit', 'ghost', x.id) +
       button('Excluir', 'delete-account', 'trash', 'danger-ghost', x.id) +
-      (x.hasCard ? button('Desvincular', 'unlink', null, 'ghost', x.id) : ''))).join('') + '</div>' : empty('Nenhum aluno cadastrado', 'Crie o primeiro login da turma.', 'users'));
+      (x.hasCard ? button('Desvincular cartão', 'unlink', null, 'ghost', x.id) : button('Vincular cartão', 'admin-card', 'card', 'ghost', x.id)))).join('') + '</div>' : empty('Nenhum aluno cadastrado', 'Crie o primeiro login da turma.', 'users'));
   if (state.page === 'teams') return intro('CONTAS COMERCIAIS', 'Estabelecimentos', 'Cadastre CNPJs fictícios e escolha quem pode operar cada conta.', button('Cadastrar estabelecimento', 'team', 'plus')) +
     section('Contas de venda', teams.length + (teams.length === 1 ? ' estabelecimento' : ' estabelecimentos'), teams.length ? '<div class="records">' + teams.map(x => record(x.name,
       'CNPJ ' + x.cnpj + ' · ' + (members.filter(m => m.team === x.id).map(m => students.find(s => s.id === m.student)?.name).join(', ') || 'Sem alunos autorizados'), 'shop',
@@ -184,18 +192,29 @@ function adminPage() {
     section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true));
   return intro('CARTÃO E CONECTIVIDADE', 'Maquininhas', 'Gerencie os terminais e seus vínculos.', button('Registrar pelo ID', 'device', 'plus')) +
     section('Taxa da maquininha', percentText(terminalFeeRate) + '% por venda no cartão', '', button('Configurar taxa', 'terminal-fee', 'edit', 'ghost')) +
-    section('Disponíveis para vincular', 'Maquininhas online e sem estabelecimento.', availableDevices.length ? '<div class="records">' +
+    section('Disponíveis para vincular', 'Maquininhas online e sem vínculo.', availableDevices.length ? '<div class="records">' +
       availableDevices.map(d => record(d.name, 'ID ' + d.id, 'device', button('Vincular', 'device-link', 'device', 'ghost', d.id))).join('') +
       '</div>' : empty('Nenhuma maquininha disponível', 'Ligue uma maquininha e conecte-a ao Wi-Fi.', 'device'),
       pill(mqtt ? 'MQTT conectado' : 'MQTT indisponível', mqtt ? 'good' : 'neutral')) +
     section('Maquininhas cadastradas', '', devices.length ? '<div class="records">' +
       devices.map(d => record(d.name, (/^\d{4}$/.test(d.id) ? 'ID ' + d.id + ' · ' : '') +
-        (d.teamName ? d.teamName + ' · CNPJ ' + teams.find(x => x.id === d.team)?.cnpj : 'Sem estabelecimento vinculado'), 'device',
+        (d.ownerRole === 'admin' ? 'Conta do banco' : d.teamName ? d.teamName + ' · CNPJ ' + teams.find(x => x.id === d.team)?.cnpj : 'Sem vínculo'), 'device',
         pill(d.online ? 'Online' : 'Offline', d.online ? 'good' : 'neutral') +
         button('Renomear', 'device-name', 'edit', 'ghost', d.id) +
         (d.team ? button('Desvincular', 'device-unlink', null, 'danger-ghost', d.id) : '') +
         button('Excluir', 'device-delete', 'trash', 'danger-ghost', d.id))).join('') +
       '</div>' : empty('Nenhuma maquininha cadastrada', 'Vincule uma maquininha disponível ou registre pelo ID.', 'device'));
+}
+function bankCardPanel(device, enrollment, students, bankId) {
+  const target = students.find(student => student.id === enrollment?.owner);
+  const pending = target && enrollment.status === 'pending';
+  const messages = { linked: 'Cartão vinculado a ', expired: 'Tempo de vinculação encerrado para ', cancelled: 'Vínculo cancelado para ' };
+  const status = pending ? enrollment.detail || 'Aproxime o cartão de ' + target.name + ' em até 1 minuto.' :
+    target && messages[enrollment.status] ? messages[enrollment.status] + target.name + '.' : '';
+  const actions = pending ? button('Cancelar vínculo', 'card-cancel', null, 'ghost', enrollment.id) :
+    button(device ? 'Gerenciar maquininha' : 'Vincular maquininha', 'pair', 'device', 'ghost', bankId);
+  return section('Maquininha do banco', status || device?.name || 'Vincule um terminal para cadastrar os cartões dos alunos.',
+    '<div class="panel-actions">' + actions + '</div>', device ? pill(device.online ? 'Online' : 'Offline', device.online ? 'good' : 'neutral') : '');
 }
 function record(title, subtitle, type, actions) {
   return '<div class="record"><span class="tile-icon purple">' + icon(type) + '</span><div class="record-name"><strong>' + esc(title) + '</strong><small>' + esc(subtitle) + '</small></div><div class="record-actions">' + actions + '</div></div>';
@@ -218,7 +237,7 @@ function studentPage() {
   const { user, teams, activity: rows, card } = state.data;
   if (state.page === 'teams' && teams.length) return teamPage(teams[0]);
   const isPending = card?.status === 'pending';
-  const cardMessage = isPending ? (card.detail || 'Aproxime seu cartão da maquininha escolhida.') :
+  const cardMessage = isPending ? (card.detail || (card.actor ? 'Aproxime seu cartão da maquininha do banco.' : 'Aproxime seu cartão da maquininha escolhida.')) :
     card?.status === 'expired' ? 'O tempo para vincular acabou. Você pode tentar novamente.' :
     user.hasCard ? 'Pronto para pagar nos estabelecimentos.' : 'Vincule um cartão para pagar por aproximação.';
   return intro('MINHA CONTA', 'Olá, ' + user.name.split(' ')[0] + '!', 'Sua conta para fazer pagamentos e acompanhar seus gastos.') +
@@ -312,17 +331,18 @@ function updateDeviceOptions() {
     ...available.map(d => new Option(d.discovered ? d.name : d.name + ' · ID ' + d.id.slice(0, 8), d.id)));
   if (available.some(d => d.id === selected)) list.value = selected;
 }
-function selectTeamDevice(teamId) {
+function selectAccountDevice(accountId) {
   const { user, devices } = state.data;
-  const team = (user.role === 'admin' ? state.data.accounts : state.data.teams).find(account => account.id === teamId);
-  if (!team) throw new Error('Estabelecimento não encontrado.');
-  const current = devices.find(device => device.team === teamId);
+  const name = user.role === 'admin' && accountId === user.id ? 'Conta do banco' :
+    (user.role === 'admin' ? state.data.accounts : state.data.teams).find(account => account.id === accountId)?.name;
+  if (!name) throw new Error('Conta não encontrada.');
+  const current = devices.find(device => device.team === accountId);
   if (current) {
-    showDialog('Maquininha vinculada', team.name, '<p>' + esc(current.name) + '</p><div class="result-actions">' +
+    showDialog('Maquininha vinculada', name, '<p>' + esc(current.name) + '</p><div class="result-actions">' +
       (user.role === 'admin' ? button('Desvincular maquininha', 'device-unlink', null, 'danger-ghost', current.id) : '') + '</div>');
     return;
   }
-  showDialog('Vincular maquininha', team.name, form(
+  showDialog('Vincular maquininha', name, form(
     '<label>Maquininha disponível<select name="device" data-available-devices></select></label>' +
     deviceIdInput('Ou digite os quatro dígitos', false), 'Vincular'));
   updateDeviceOptions();
@@ -330,8 +350,8 @@ function selectTeamDevice(teamId) {
     const chosen = deviceId || device;
     if (!chosen) throw new Error('Selecione uma maquininha ou informe os quatro dígitos.');
     return user.role === 'admin'
-      ? complete('/admin/devices/' + encodeURIComponent(chosen) + '/link', { team: teamId }, 'Maquininha vinculada.')
-      : complete('/teams/' + teamId + '/device', { device: chosen }, 'Maquininha vinculada.');
+      ? complete('/admin/devices/' + encodeURIComponent(chosen) + '/link', { team: accountId }, 'Maquininha vinculada.')
+      : complete('/teams/' + accountId + '/device', { device: chosen }, 'Maquininha vinculada.');
   });
 }
 function saleDialog(team) {
@@ -652,7 +672,7 @@ document.addEventListener('click', async e => {
   const b = e.target.closest('[data-action]');
   if (!b || !state.data) return;
   const { action, id } = b.dataset;
-  const { accounts = [], members = [], teams = [], devices } = state.data;
+  const { user, accounts = [], members = [], teams = [], devices } = state.data;
   try {
     switch (action) {
       case 'page': state.page = id; drawPage(); window.scrollTo(0, 0); break;
@@ -749,19 +769,40 @@ document.addEventListener('click', async e => {
           student ? 'Aluno excluído.' : 'Estabelecimento excluído.'));
         break;
       }
+      case 'reset-balances':
+        showDialog('Zerar todos os saldos', 'O saldo do banco, dos alunos e dos estabelecimentos ficará em R$ 0,00.',
+          form('<p>Os cadastros e o histórico de pagamentos serão preservados.</p>', 'Zerar saldos', 'danger'));
+        onForm(() => complete('/admin/balances/reset', {}, 'Todos os saldos foram zerados.'));
+        break;
+      case 'reset-history':
+        showDialog('Zerar histórico e saldos', 'Os extratos serão limpos e os saldos do banco, dos alunos e dos estabelecimentos ficarão em R$ 0,00.',
+          form('<p>Os cadastros e os vínculos serão preservados.</p>', 'Zerar histórico e saldos', 'danger'));
+        onForm(() => complete('/admin/history/reset', {}, 'Histórico e saldos zerados.'));
+        break;
+      case 'delete-all': {
+        const students = id === 'students';
+        const label = students ? 'Excluir todos os alunos' : 'Excluir todos os estabelecimentos';
+        const description = students
+          ? 'Os alunos perderão acesso ao banco. Os cartões serão liberados e os estabelecimentos ficarão sem operadores.'
+          : 'As cobranças em aberto serão canceladas e as maquininhas dos estabelecimentos serão liberadas.';
+        showDialog(label, description, form('<p>Os saldos dessas contas ficarão indisponíveis e o histórico será preservado.</p>', label, 'danger'));
+        onForm(() => complete('/admin/' + id + '/delete-all', {}, students ? 'Alunos excluídos.' : 'Estabelecimentos excluídos.'));
+        break;
+      }
       case 'unlink':
         showDialog('Desvincular cartão', 'O aluno poderá vincular outro cartão pelo banco.', form('', 'Desvincular'));
         onForm(() => complete('/admin/students/' + id + '/unlink', {}, 'Cartão desvinculado.'));
         break;
       case 'pair':
-        selectTeamDevice(id);
+        selectAccountDevice(id);
         break;
       case 'device-link': {
         const device = state.data.availableDevices.find(item => item.id === id);
         if (!device) break;
-        const available = accounts.filter(account => account.role === 'team' && !devices.some(item => item.team === account.id));
-        if (!available.length) throw new Error('Nenhum estabelecimento sem maquininha está disponível.');
-        showDialog('Vincular maquininha', device.name, form(select('Estabelecimento', 'team', available), 'Vincular'));
+        const available = [{ id: user.id, name: 'Conta do banco' }, ...accounts.filter(account => account.role === 'team')]
+          .filter(account => !devices.some(item => item.team === account.id));
+        if (!available.length) throw new Error('Nenhuma conta sem maquininha está disponível.');
+        showDialog('Vincular maquininha', device.name, form(select('Conta de destino', 'team', available), 'Vincular'));
         onForm(data => complete('/admin/devices/' + id + '/link', data, 'Maquininha vinculada.'));
         break;
       }
@@ -769,7 +810,7 @@ document.addEventListener('click', async e => {
         const device = devices.find(item => item.id === id);
         if (!device) break;
         showDialog('Desvincular maquininha', device.name,
-          form('<p>O terminal ficará disponível para outro estabelecimento. Cobranças no cartão e vínculos de cartão em andamento neste terminal serão cancelados.</p>', 'Desvincular', 'danger'));
+          form('<p>O terminal ficará disponível para outra conta. Cobranças no cartão e vínculos de cartão em andamento neste terminal serão cancelados.</p>', 'Desvincular', 'danger'));
         onForm(() => complete('/admin/devices/' + id + '/unlink', {}, 'Maquininha desvinculada.'));
         break;
       }
@@ -784,7 +825,8 @@ document.addEventListener('click', async e => {
       case 'device-delete': {
         const device = devices.find(item => item.id === id);
         if (!device) break;
-        const unlink = device.teamName ? '<p>O vínculo com <strong>' + esc(device.teamName) + '</strong> será removido.</p>' : '';
+        const owner = device.ownerRole === 'admin' ? 'Conta do banco' : device.teamName;
+        const unlink = owner ? '<p>O vínculo com <strong>' + esc(owner) + '</strong> será removido.</p>' : '';
         showDialog('Excluir maquininha', device.name, form(unlink +
           '<p>As cobranças e os cadastros de cartão em andamento nesta maquininha serão cancelados. O histórico de pagamentos será preservado.</p>',
           'Excluir maquininha', 'danger'));
@@ -800,10 +842,22 @@ document.addEventListener('click', async e => {
         break;
       case 'card': {
         if (state.data.card?.status === 'pending') throw new Error('Já existe um vínculo em andamento.');
-        const online = devices.filter(x => x.online && x.team);
+        const online = devices.filter(x => x.online && x.ownerRole === 'team');
         if (!online.length) throw new Error('Nenhuma maquininha vinculada está online.');
         showDialog('Vincular cartão', 'Escolha o terminal perto de você. Depois, aproxime seu cartão em até 1 minuto.', form(select('Maquininha', 'device', online), 'Iniciar vínculo'));
         onForm(data => complete('/card', data, 'Aproxime seu cartão.'));
+        break;
+      }
+      case 'admin-card': {
+        const student = accounts.find(item => item.id === id && item.role === 'student');
+        if (!student) break;
+        const device = devices.find(item => item.team === user.id);
+        if (!device) { selectAccountDevice(user.id); break; }
+        if (!device.online) throw new Error('A maquininha do banco está offline.');
+        if (state.data.cardEnrollment?.status === 'pending') throw new Error('A maquininha do banco está aguardando outro cartão.');
+        showDialog('Vincular cartão', student.name,
+          form('<p>Após iniciar, aproxime o cartão de ' + esc(student.name) + ' de ' + esc(device.name) + ' em até 1 minuto.</p>', 'Iniciar vínculo'));
+        onForm(() => complete('/admin/students/' + id + '/card', {}, 'Aproxime o cartão da maquininha do banco.'));
         break;
       }
       case 'card-cancel': await complete('/card/' + id + '/cancel', {}, 'Vínculo cancelado.'); break;
