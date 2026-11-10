@@ -20,38 +20,38 @@ export function bridge(db, config, changed) {
       op: op.id, expires, sig: signature(device.key, 'arm', device.id, op.id, expires)
     }), { qos: 1 });
   };
-  function receive(id, event, retained = false) {
+  async function receive(id, event, retained = false) {
     if (retained || !event || typeof event !== 'object') return;
     const { type, nonce, op = '', card = '', sig } = event;
     if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) return;
     if (type === 'hello' ? (op !== '' || card !== '') :
       (type !== 'tap' || !/^[a-f0-9-]{36}$/.test(op) || !/^(?:[A-F0-9]{8}|[A-F0-9]{14}|[A-F0-9]{20})$/.test(card))) return;
-    const device = get(db, 'SELECT * FROM devices WHERE id=?', id);
+    const device = await get(db, 'SELECT * FROM devices WHERE id=?', id);
     if (!device || !timingSafeEqual(Buffer.from(sig, 'hex'),
       Buffer.from(signature(device.key, type, id, nonce, op, card), 'hex'))) return;
-    const active = transaction(db, () => {
-      expire(db);
-      run(db, 'UPDATE devices SET seen=? WHERE id=?', Date.now(), id);
-      const current = get(db, "SELECT * FROM operations WHERE device=? AND status='pending'", id);
+    const active = await transaction(db, async db => {
+      await expire(db);
+      await run(db, 'UPDATE devices SET seen=? WHERE id=?', Date.now(), id);
+      const current = await get(db, "SELECT * FROM operations WHERE device=? AND status='pending'", id);
       if (type === 'hello') return current;
       if (!current || current.id !== op) return;
-      const event = run(db, 'INSERT OR IGNORE INTO tap_events VALUES (?,?,?)', id, nonce, Date.now());
+      const event = await run(db, 'INSERT INTO tap_events VALUES (?,?,?) ON CONFLICT DO NOTHING', id, nonce, Date.now());
       if (!event.changes) return;
-      run(db, 'DELETE FROM tap_events WHERE created<?', Date.now() - 86400000);
+      await run(db, 'DELETE FROM tap_events WHERE created<?', Date.now() - 86400000);
       try {
         if (current.kind === 'card') {
-          const owner = get(db, 'SELECT id FROM accounts WHERE card=?', card);
+          const owner = await get(db, 'SELECT id FROM accounts WHERE card=?', card);
           if (owner && owner.id !== current.owner) throw new Rule('Cartão já vinculado a outra conta.');
-          run(db, 'UPDATE accounts SET card=? WHERE id=?', card, current.owner);
-          run(db, "UPDATE operations SET status='linked',detail=NULL WHERE id=?", current.id);
+          await run(db, 'UPDATE accounts SET card=? WHERE id=?', card, current.owner);
+          await run(db, "UPDATE operations SET status='linked',detail=NULL WHERE id=?", current.id);
         } else {
-          const payer = get(db, "SELECT id FROM accounts WHERE card=? AND role='student'", card);
+          const payer = await get(db, "SELECT id FROM accounts WHERE card=? AND role='student'", card);
           if (!payer) throw new Rule('Cartão sem vínculo. Tente outro cartão ou gere um Pix.');
-          settle(db, current, payer.id, 'rfid');
+          await settle(db, current, payer.id, 'rfid');
         }
       } catch (error) {
         if (!(error instanceof Rule)) throw error;
-        run(db, 'UPDATE operations SET detail=? WHERE id=?', error.message, current.id);
+        await run(db, 'UPDATE operations SET detail=? WHERE id=?', error.message, current.id);
       }
     });
     if (active) send(device, active);
@@ -66,14 +66,14 @@ export function bridge(db, config, changed) {
   });
   client?.on('close', () => { ready = false; changed(); });
   client?.on('error', error => console.warn('MQTT:', error.message));
-  client?.on('message', (path, buffer, packet) => {
+  client?.on('message', async (path, buffer, packet) => {
     if (buffer.length > 1024) return;
-    try { receive(path.split('/').at(-2), JSON.parse(buffer), packet.retain); }
+    try { await receive(path.split('/').at(-2), JSON.parse(buffer), packet.retain); }
     catch (error) { if (!(error instanceof SyntaxError)) console.error('Falha ao processar evento RFID:', error); }
   });
   return {
     ready: () => ready,
-    arm: op => send(get(db, 'SELECT * FROM devices WHERE id=?', op.device), op),
+    arm: async op => send(await get(db, 'SELECT * FROM devices WHERE id=?', op.device), op),
     close: () => client?.end(true)
   };
 }

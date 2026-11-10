@@ -68,19 +68,21 @@ No celular, o navegador exige HTTPS e permissão de câmera para leitura ao vivo
 ## Publicação no Railway
 
 1. Envie o conteúdo da pasta `banco-feira` para um repositório e conecte esse repositório a um serviço no Railway. Se a pasta estiver dentro de um repositório maior, configure a raiz do serviço para apontar para ela.
-2. Anexe um volume ao serviço, com caminho **`/data`**. O banco fica em `/data/banco.sqlite`. A configuração usa uma réplica. [Volumes no Railway](https://docs.railway.com/volumes)
+2. Com um serviço PostgreSQL no mesmo projeto e ambiente, abra **Variables** no serviço do Banco Virtual e adicione uma referência à variável `DATABASE_URL` do serviço PostgreSQL. Por exemplo, se o serviço se chama `Postgres`, o valor é `${{Postgres.DATABASE_URL}}`. A aplicação cria as tabelas na primeira inicialização. [PostgreSQL no Railway](https://docs.railway.com/databases/postgresql)
 3. Em **Variables**, defina `ADMIN_USER`, `ADMIN_PASSWORD` e `MQTT_URL=mqtt://tokaido.proxy.rlwy.net:17906` ou o endpoint TLS do broker. Se usar um prefixo diferente ou autenticação MQTT, defina as variáveis correspondentes.
 4. Gere um domínio HTTPS em **Networking**. O Dockerfile instala as dependências, e a aplicação usa o `PORT` informado pelo Railway e responde em `/health`. [Verificação de saúde no Railway](https://docs.railway.com/deployments/healthchecks)
 
-O volume deve estar anexado antes de iniciar o serviço, para que os saldos persistam entre versões. Defina credenciais próprias em produção e reserve o comando `npm run demo` para testes locais.
+Com `DATABASE_URL`, os dados são salvos no PostgreSQL e o serviço web dispensa um volume próprio. O SQLite continua disponível para uso local ou no Railway com um volume montado em `/data` e `DATABASE_URL` ausente. Os dados de um arquivo SQLite existente precisam ser migrados separadamente para o PostgreSQL. [Volumes no Railway](https://docs.railway.com/volumes)
 
 ## Estrutura e testes
 
 - `web/`: interface responsiva, teclado de venda e leitor de QR Code.
-- `server/`: API Node.js, sessões, banco SQLite, SSE e integração MQTT.
+- `server/`: API Node.js, sessões, PostgreSQL ou SQLite, SSE e integração MQTT.
 - `firmware/`: código do ESP32 e configuração do RC522.
 - `test/`: fluxos com API real, banco em memória, broker local e maquininha simulada.
 
 O site e a API rodam no mesmo domínio. O Pix é confirmado por HTTPS. O SSE avisa os navegadores quando o estado muda, com consultas periódicas como alternativa se a conexão cair. O MQTT só transporta eventos e comandos da maquininha. Os valores são armazenados em centavos, e a baixa da cobrança e a movimentação dos dois saldos ocorrem em uma única transação.
 
 Execute `npm.cmd test` para verificar autorização, QR Code, pagamentos concorrentes, notificações SSE, vínculo RFID, recusa por saldo e troca de cartão por Pix.
+
+Para repetir os testes com PostgreSQL, defina `TEST_DATABASE_URL` com a URL de um banco de testes. A suíte cria e remove um esquema isolado por cenário.

@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import Aedes from 'aedes';
 import mqtt from 'mqtt';
+import pg from 'pg';
 import { createApp } from '../server/app.js';
 import { openDb } from '../server/db.js';
 import { signature } from '../server/mqtt.js';
@@ -19,16 +20,39 @@ async function eventually(check) {
   assert.fail('Estado esperado não observado');
 }
 async function setup(config, t, memberCount = 3) {
-  const db = openDb(':memory:');
-  const { app, close } = createApp(db, { ADMIN_USER: 'gestor', ADMIN_PASSWORD: 'GestorTeste2026', ...config });
-  const server = app.listen(0, '127.0.0.1');
-  await once(server, 'listening');
+  let connectionString;
+  let disposeSchema;
+  let db, server, close;
   t.after(async () => {
-    close();
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-    db.close();
+    try {
+      close?.();
+      if (server) {
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+      }
+      await db?.close();
+    } finally {
+      await disposeSchema?.();
+    }
   });
+  if (process.env.TEST_DATABASE_URL) {
+    const url = new URL(process.env.TEST_DATABASE_URL);
+    const schema = 'test_' + randomBytes(8).toString('hex');
+    const client = new pg.Client({ connectionString: url.toString() });
+    await client.connect();
+    disposeSchema = async () => {
+      try { await client.query('DROP SCHEMA IF EXISTS ' + schema + ' CASCADE'); }
+      finally { await client.end(); }
+    };
+    await client.query('CREATE SCHEMA ' + schema);
+    url.searchParams.set('options', '-c search_path=' + schema);
+    connectionString = url.toString();
+  }
+  db = await openDb(':memory:', connectionString);
+  const bank = await createApp(db, { ADMIN_USER: 'gestor', ADMIN_PASSWORD: 'GestorTeste2026', ...config });
+  close = bank.close;
+  server = bank.app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
   const url = 'http://127.0.0.1:' + server.address().port;
   function session() {
     let cookie = '';

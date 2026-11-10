@@ -11,8 +11,8 @@ const web = fileURLToPath(new URL('../web/', import.meta.url));
 const scanner = fileURLToPath(new URL('../node_modules/jsqr/dist/jsQR.js', import.meta.url));
 const login = /^[a-z0-9._-]{3,40}$/;
 const normalize = value => typeof value === 'string' ? value.trim() : '';
-const userFields = 'id,name,role,username,cnpj,balance,card IS NOT NULL AS hasCard';
-const deviceFields = 'd.id,d.name,d.team,d.seen,a.name AS teamName';
+const userFields = 'id,name,role,username,cnpj,balance,CAST(card IS NOT NULL AS INTEGER) AS "hasCard"';
+const deviceFields = 'd.id,d.name,d.team,d.seen,a.name AS "teamName"';
 const lastMinute = () => Date.now() - 25000;
 const publicDevice = d => ({ ...d, online: d.seen >= lastMinute() });
 
@@ -24,13 +24,25 @@ function amount(value) {
   return value;
 }
 
-export function createApp(db, config = process.env) {
-  initAdmin(db, config.ADMIN_USER, config.ADMIN_PASSWORD);
+export async function createApp(db, config = process.env) {
+  await initAdmin(db, config.ADMIN_USER, config.ADMIN_PASSWORD);
   const streams = new Map();
-  const changed = () => {
-    for (const [res, token] of streams) {
-      if (!get(db, 'SELECT 1 FROM sessions WHERE token=? AND expires>?', token, Date.now())) res.end();
-      else if (!res.writableNeedDrain) res.write('event: update\ndata: {}\n\n');
+  const changed = async () => {
+    const snapshot = Array.from(streams);
+    if (!snapshot.length) return;
+    try {
+      const tokens = snapshot.map(([, token]) => token);
+      const placeholders = tokens.map(() => '?').join(',');
+      const sessions = await all(db, 'SELECT token FROM sessions WHERE expires>? AND token IN (' + placeholders + ')',
+        Date.now(), ...tokens);
+      const active = new Set(sessions.map(session => session.token));
+      for (const [res, token] of snapshot) {
+        if (res.writableEnded || res.destroyed) continue;
+        if (!active.has(token)) res.end();
+        else if (!res.writableNeedDrain) res.write('event: update\ndata: {}\n\n');
+      }
+    } catch (error) {
+      console.warn('Falha ao atualizar conexões do site:', error.code || error.name);
     }
   };
   const tick = setInterval(changed, 10000).unref();
@@ -50,7 +62,10 @@ export function createApp(db, config = process.env) {
     });
     next();
   });
-  app.get('/health', (req, res) => res.json({ ok: true }));
+  app.get('/health', async (req, res) => {
+    await get(db, 'SELECT 1');
+    res.json({ ok: true });
+  });
   app.get('/vendor/jsqr.js', (req, res) => res.sendFile(scanner));
   app.use('/api', api);
   api.use((req, res, next) => {
@@ -69,7 +84,7 @@ export function createApp(db, config = process.env) {
     }
     next();
   });
-  api.post('/login', (req, res) => {
+  api.post('/login', async (req, res) => {
     const username = normalize(req.body.username).toLowerCase();
     const password = req.body.password;
     check(login.test(username) && typeof password === 'string' && password.length <= 128,
@@ -80,7 +95,7 @@ export function createApp(db, config = process.env) {
     const throttleKey = ip + '|' + username;
     const tally = attempts.get(throttleKey) || { count: 0, until: deadline(5) };
     check(tally.count < 8, 'Muitas tentativas. Aguarde alguns minutos.', 429);
-    const account = get(db, 'SELECT id,password FROM accounts WHERE username=?', username);
+    const account = await get(db, 'SELECT id,password FROM accounts WHERE username=?', username);
     if (!verifyPassword(password, account?.password || dummy) || !account) {
       tally.count++;
       if (attempts.size < 5000) attempts.set(throttleKey, tally);
@@ -88,25 +103,27 @@ export function createApp(db, config = process.env) {
     }
     attempts.delete(throttleKey);
     const token = secret();
-    transaction(db, () => {
-      run(db, 'DELETE FROM sessions WHERE expires<=? OR token=?', now, hash(sessionToken(req) || ''));
-      run(db, 'INSERT INTO sessions VALUES (?,?,?)', hash(token), account.id, deadline(720));
+    await transaction(db, async db => {
+      check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND username=? AND password=?',
+        account.id, username, account.password), 'Usuário ou senha inválidos.', 401);
+      await run(db, 'DELETE FROM sessions WHERE expires<=? OR token=?', now, hash(sessionToken(req) || ''));
+      await run(db, 'INSERT INTO sessions VALUES (?,?,?)', hash(token), account.id, deadline(720));
     });
     res.cookie('feira', token, { ...cookie, maxAge: 12 * 3600000 }).json({ ok: true });
   });
-  api.use((req, res, next) => {
+  api.use(async (req, res, next) => {
     const token = sessionToken(req);
-    const session = token && get(db, 'SELECT account FROM sessions WHERE token=? AND expires>?', hash(token), Date.now());
+    const session = token && await get(db, 'SELECT account FROM sessions WHERE token=? AND expires>?', hash(token), Date.now());
     check(session, 'Entre na sua conta para continuar.', 401);
-    req.user = get(db, 'SELECT ' + userFields + ' FROM accounts WHERE id=? AND deleted_at IS NULL', session.account);
+    req.user = await get(db, 'SELECT ' + userFields + ' FROM accounts WHERE id=? AND deleted_at IS NULL', session.account);
     check(req.user, 'Entre na sua conta para continuar.', 401);
     next();
   });
-  api.post('/logout', (req, res) => {
-    run(db, 'DELETE FROM sessions WHERE token=?', hash(sessionToken(req)));
+  api.post('/logout', async (req, res) => {
+    await run(db, 'DELETE FROM sessions WHERE token=?', hash(sessionToken(req)));
     res.clearCookie('feira', cookie).json({ ok: true });
   });
-  api.get('/events', (req, res) => {
+  api.get('/events', async (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
     res.write('retry: 3000\nevent: update\ndata: {}\n\n');
@@ -116,35 +133,35 @@ export function createApp(db, config = process.env) {
 
   const manager = req => check(req.user.role === 'admin', 'Acesso reservado ao gestor.', 403);
   const student = req => check(req.user.role === 'student', 'Acesse com uma conta de aluno.', 403);
-  function teamAccess(req, team) {
+  async function teamAccess(db, req, team) {
     student(req);
-    check(get(db, 'SELECT 1 FROM members WHERE team=? AND student=?', team, req.user.id),
+    check(await get(db, 'SELECT 1 FROM members WHERE team=? AND student=?', team, req.user.id),
       'Você não faz parte deste estabelecimento.', 403);
   }
-  const devices = (where = '', ...args) => all(db, 'SELECT ' + deviceFields +
-    ' FROM devices d LEFT JOIN accounts a ON a.id=d.team ' + where + ' ORDER BY d.name', ...args).map(publicDevice);
-  const operation = id => get(db, 'SELECT * FROM operations WHERE id=?', id);
+  const devices = async (where = '', ...args) => (await all(db, 'SELECT ' + deviceFields +
+    ' FROM devices d LEFT JOIN accounts a ON a.id=d.team ' + where + ' ORDER BY d.name', ...args)).map(publicDevice);
+  const operation = (db, id) => get(db, 'SELECT * FROM operations WHERE id=?', id);
 
-  api.get('/home', (req, res) => {
-    expire(db);
+  api.get('/home', async (req, res) => {
+    await expire(db);
     const user = req.user;
     if (user.role === 'admin') {
-      const accounts = all(db, "SELECT " + userFields + " FROM accounts WHERE role<>'admin' AND deleted_at IS NULL ORDER BY name");
-      const members = all(db, 'SELECT team,student FROM members');
-      return res.json({ user, accounts, members, devices: devices(), mqtt: mqtt.ready(), activity: all(db,
-        'SELECT l.id,l.amount,l.method,l.created,p.name AS fromName,r.name AS toName FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
+      const accounts = await all(db, "SELECT " + userFields + " FROM accounts WHERE role<>'admin' AND deleted_at IS NULL ORDER BY name");
+      const members = await all(db, 'SELECT team,student FROM members');
+      return res.json({ user, accounts, members, devices: await devices(), mqtt: mqtt.ready(), activity: await all(db,
+        'SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName" FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
     }
-    const teams = all(db, 'SELECT a.id,a.name,a.cnpj,a.balance FROM accounts a JOIN members m ON a.id=m.team WHERE m.student=?', user.id);
+    const teams = await all(db, 'SELECT a.id,a.name,a.cnpj,a.balance FROM accounts a JOIN members m ON a.id=m.team WHERE m.student=?', user.id);
     for (const team of teams) {
-      team.activity = activity(db, team.id);
-      team.device = devices('WHERE d.team=?', team.id)[0] || null;
-      team.sale = get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY created DESC,rowid DESC LIMIT 1", team.id) || null;
+      team.activity = await activity(db, team.id);
+      team.device = (await devices('WHERE d.team=?', team.id))[0] || null;
+      team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
     }
-    res.json({ user, teams, activity: activity(db, user.id), devices: devices('WHERE d.team IS NOT NULL'),
-      card: get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY created DESC,rowid DESC LIMIT 1", user.id) || null });
+    res.json({ user, teams, activity: await activity(db, user.id), devices: await devices('WHERE d.team IS NOT NULL'),
+      card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
   });
 
-  api.post(['/admin/students', '/admin/students/:id/edit'], (req, res) => {
+  api.post(['/admin/students', '/admin/students/:id/edit'], async (req, res) => {
     manager(req);
     const { id } = req.params;
     const name = normalize(req.body.name);
@@ -154,20 +171,20 @@ export function createApp(db, config = process.env) {
       'Informe um nome e um usuário de 3 a 40 caracteres.');
     check((id && password === '') || (typeof password === 'string' && password.length >= 8 && password.length <= 128),
       'A senha deve ter de 8 a 128 caracteres.');
-    transaction(db, () => {
-      if (id) check(get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", id), 'Aluno não encontrado.', 404);
-      check(!get(db, 'SELECT 1 FROM accounts WHERE username=? AND id<>?', username, id || ''), 'Este usuário já existe.', 409);
+    await transaction(db, async db => {
+      if (id) check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", id), 'Aluno não encontrado.', 404);
+      check(!await get(db, 'SELECT 1 FROM accounts WHERE username=? AND id<>?', username, id || ''), 'Este usuário já existe.', 409);
       const digest = password ? passwordHash(password) : null;
       if (id) {
-        run(db, 'UPDATE accounts SET name=?,username=?,password=COALESCE(?,password) WHERE id=?', name, username, digest, id);
-        if (digest) run(db, 'DELETE FROM sessions WHERE account=?', id);
+        await run(db, 'UPDATE accounts SET name=?,username=?,password=COALESCE(?,password) WHERE id=?', name, username, digest, id);
+        if (digest) await run(db, 'DELETE FROM sessions WHERE account=?', id);
       } else {
-        run(db, "INSERT INTO accounts (id,name,role,username,password) VALUES (?,?,'student',?,?)", uid(), name, username, digest);
+        await run(db, "INSERT INTO accounts (id,name,role,username,password) VALUES (?,?,'student',?,?)", uid(), name, username, digest);
       }
     });
     res.status(id ? 200 : 201).json({ ok: true });
   });
-  api.post(['/admin/teams', '/admin/teams/:id/edit'], (req, res) => {
+  api.post(['/admin/teams', '/admin/teams/:id/edit'], async (req, res) => {
     manager(req);
     const { id } = req.params;
     const name = normalize(req.body.name);
@@ -178,189 +195,191 @@ export function createApp(db, config = process.env) {
     check(Array.isArray(members) && members.length > 0 &&
       new Set(members).size === members.length && members.every(member => typeof member === 'string'),
       'Selecione pelo menos um aluno. Cada aluno pode ser selecionado uma única vez.');
-    transaction(db, () => {
-      if (id) check(get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", id), 'Estabelecimento não encontrado.', 404);
+    await transaction(db, async db => {
+      if (id) check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", id), 'Estabelecimento não encontrado.', 404);
       const team = id || uid();
-      check(!get(db, 'SELECT 1 FROM accounts WHERE cnpj=? AND id<>?', cnpj, team), 'Este CNPJ já está cadastrado.', 409);
+      check(!await get(db, 'SELECT 1 FROM accounts WHERE cnpj=? AND id<>?', cnpj, team), 'Este CNPJ já está cadastrado.', 409);
       for (const member of members) {
-        check(get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", member), 'Aluno inválido.');
-        check(!get(db, 'SELECT 1 FROM members WHERE student=? AND team<>?', member, team),
+        check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", member), 'Aluno inválido.');
+        check(!await get(db, 'SELECT 1 FROM members WHERE student=? AND team<>?', member, team),
           'Um dos alunos já pertence a outro estabelecimento.', 409);
       }
       if (id) {
-        run(db, 'UPDATE accounts SET name=?,cnpj=? WHERE id=?', name, cnpj, team);
-        run(db, 'DELETE FROM members WHERE team=?', team);
+        await run(db, 'UPDATE accounts SET name=?,cnpj=? WHERE id=?', name, cnpj, team);
+        await run(db, 'DELETE FROM members WHERE team=?', team);
       } else {
-        run(db, "INSERT INTO accounts (id,name,role,cnpj) VALUES (?,?,'team',?)", team, name, cnpj);
+        await run(db, "INSERT INTO accounts (id,name,role,cnpj) VALUES (?,?,'team',?)", team, name, cnpj);
       }
-      for (const member of members) run(db, 'INSERT INTO members VALUES (?,?)', team, member);
+      for (const member of members) await run(db, 'INSERT INTO members VALUES (?,?)', team, member);
     });
     res.status(id ? 200 : 201).json({ ok: true });
   });
-  api.post('/admin/:collection/:id/delete', (req, res) => {
+  api.post('/admin/:collection/:id/delete', async (req, res) => {
     manager(req);
     const { collection, id } = req.params;
     check(collection === 'students' || collection === 'teams', 'Cadastro não encontrado.', 404);
     const role = collection === 'students' ? 'student' : 'team';
-    transaction(db, () => {
-      const account = get(db, 'SELECT deleted_at FROM accounts WHERE id=? AND role=?', id, role);
+    await transaction(db, async db => {
+      const account = await get(db, 'SELECT deleted_at FROM accounts WHERE id=? AND role=?', id, role);
       check(account, 'Cadastro não encontrado.', 404);
       if (account.deleted_at !== null) return;
-      run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND status='pending'", id);
+      await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND status='pending'", id);
       if (role === 'student') {
-        const membership = get(db, 'SELECT team FROM members WHERE student=?', id);
-        run(db, 'DELETE FROM members WHERE student=?', id);
-        if (membership && !get(db, 'SELECT 1 FROM members WHERE team=?', membership.team)) {
-          run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='sale' AND status='pending'", membership.team);
+        const membership = await get(db, 'SELECT team FROM members WHERE student=?', id);
+        await run(db, 'DELETE FROM members WHERE student=?', id);
+        if (membership && !await get(db, 'SELECT 1 FROM members WHERE team=?', membership.team)) {
+          await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='sale' AND status='pending'", membership.team);
         }
       } else {
-        run(db, 'DELETE FROM members WHERE team=?', id);
-        run(db, "UPDATE operations SET status='cancelled' WHERE status='pending' AND device IN (SELECT id FROM devices WHERE team=?)", id);
-        run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE team=?', id);
+        await run(db, 'DELETE FROM members WHERE team=?', id);
+        await run(db, "UPDATE operations SET status='cancelled' WHERE status='pending' AND device IN (SELECT id FROM devices WHERE team=?)", id);
+        await run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE team=?', id);
       }
-      run(db, 'DELETE FROM sessions WHERE account=?', id);
-      run(db, 'UPDATE accounts SET deleted_at=?,username=NULL,password=NULL,cnpj=NULL,card=NULL WHERE id=?', Date.now(), id);
+      await run(db, 'DELETE FROM sessions WHERE account=?', id);
+      await run(db, 'UPDATE accounts SET deleted_at=?,username=NULL,password=NULL,cnpj=NULL,card=NULL WHERE id=?', Date.now(), id);
     });
     res.json({ ok: true });
   });
-  api.post('/admin/credit', (req, res) => {
+  api.post('/admin/credit', async (req, res) => {
     manager(req);
     const { account, request } = req.body;
-    check(typeof account === 'string' && get(db, "SELECT 1 FROM accounts WHERE id=? AND role IN ('student','team') AND deleted_at IS NULL", account),
+    check(typeof account === 'string' && await get(db, "SELECT 1 FROM accounts WHERE id=? AND role IN ('student','team') AND deleted_at IS NULL", account),
       'Selecione um aluno ou um estabelecimento.');
     check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
     const cents = amount(req.body.amount);
-    transaction(db, () => transfer(db, { payee: account, amount: cents, method: 'credit', actor: req.user.id, request }));
+    await transaction(db, db => transfer(db, { payee: account, amount: cents, method: 'credit', actor: req.user.id, request }));
     res.json({ ok: true });
   });
-  api.post('/admin/devices', (req, res) => {
+  api.post('/admin/devices', async (req, res) => {
     manager(req);
     const name = normalize(req.body.name);
     check(name.length >= 2 && name.length <= 50, 'Informe um nome para a maquininha.');
     const id = uid(), key = secret(), pairing = secret().slice(0, 12).toUpperCase();
-    run(db, 'INSERT INTO devices (id,name,key,pairing) VALUES (?,?,?,?)', id, name, key, hash(pairing));
+    await run(db, 'INSERT INTO devices (id,name,key,pairing) VALUES (?,?,?,?)', id, name, key, hash(pairing));
     res.status(201).json({ id, key, pairing });
   });
-  api.post('/admin/devices/:id/reset', (req, res) => {
+  api.post('/admin/devices/:id/reset', async (req, res) => {
     manager(req);
     const pairing = secret().slice(0, 12).toUpperCase();
-    transaction(db, () => {
-      check(get(db, 'SELECT 1 FROM devices WHERE id=?', req.params.id), 'Maquininha não encontrada.', 404);
-      run(db, "UPDATE operations SET status='cancelled' WHERE device=? AND status='pending'", req.params.id);
-      run(db, 'UPDATE devices SET team=NULL,pairing=? WHERE id=?', hash(pairing), req.params.id);
+    await transaction(db, async db => {
+      check(await get(db, 'SELECT 1 FROM devices WHERE id=?', req.params.id), 'Maquininha não encontrada.', 404);
+      await run(db, "UPDATE operations SET status='cancelled' WHERE device=? AND status='pending'", req.params.id);
+      await run(db, 'UPDATE devices SET team=NULL,pairing=? WHERE id=?', hash(pairing), req.params.id);
     });
     res.json({ pairing });
   });
-  api.post('/admin/students/:id/unlink', (req, res) => {
+  api.post('/admin/students/:id/unlink', async (req, res) => {
     manager(req);
-    transaction(db, () => {
-      run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='card' AND status='pending'", req.params.id);
-      run(db, "UPDATE accounts SET card=NULL WHERE id=? AND role='student'", req.params.id);
+    await transaction(db, async db => {
+      await run(db, "UPDATE operations SET status='cancelled' WHERE owner=? AND kind='card' AND status='pending'", req.params.id);
+      await run(db, "UPDATE accounts SET card=NULL WHERE id=? AND role='student'", req.params.id);
     });
     res.json({ ok: true });
   });
-  api.post('/teams/:team/device', (req, res) => {
+  api.post('/teams/:team/device', async (req, res) => {
     const team = req.params.team;
-    teamAccess(req, team);
     const pairing = normalize(req.body.pairing).toUpperCase();
     check(/^[A-F0-9]{12}$/.test(pairing), 'Informe o código de vínculo de 12 caracteres.');
-    transaction(db, () => {
-      check(!get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
-      const result = run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE pairing=? AND team IS NULL', team, hash(pairing));
+    await transaction(db, async db => {
+      await teamAccess(db, req, team);
+      check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
+      const result = await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE pairing=? AND team IS NULL', team, hash(pairing));
       check(result.changes, 'Código de vínculo inválido ou já usado.', 404);
     });
     res.json({ ok: true });
   });
 
-  function reserve(deviceId) {
+  async function reserve(db, deviceId) {
     check(mqtt.ready(), 'MQTT indisponível. Verifique a conexão da maquininha.');
-    const device = get(db, 'SELECT * FROM devices WHERE id=? AND team IS NOT NULL', deviceId);
+    const device = await get(db, 'SELECT * FROM devices WHERE id=? AND team IS NOT NULL', deviceId);
     check(device && device.seen >= lastMinute(), 'A maquininha está offline.');
-    check(!get(db, "SELECT 1 FROM operations WHERE device=? AND status='pending'", device.id), 'Maquininha ocupada.', 409);
+    check(!await get(db, "SELECT 1 FROM operations WHERE device=? AND status='pending'", device.id), 'Maquininha ocupada.', 409);
     return device.id;
   }
-  function startOperation({ kind, owner, device, method, cents = 0, minutes }) {
+  async function startOperation(db, { kind, owner, device, method, cents = 0, minutes }) {
     const id = uid();
-    run(db, 'INSERT INTO operations (id,kind,owner,device,method,amount,created,expires) VALUES (?,?,?,?,?,?,?,?)',
+    await run(db, 'INSERT INTO operations (id,kind,owner,device,method,amount,created,expires) VALUES (?,?,?,?,?,?,?,?)',
       id, kind, owner, device, method, cents, Date.now(), deadline(minutes));
-    return operation(id);
+    return operation(db, id);
   }
-  api.post('/card', (req, res) => {
+  api.post('/card', async (req, res) => {
     student(req);
     check(typeof req.body.device === 'string', 'Escolha uma maquininha.');
-    const op = transaction(db, () => {
-      expire(db);
-      check(!get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='card' AND status='pending'", req.user.id),
+    const op = await transaction(db, async db => {
+      await expire(db);
+      check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND deleted_at IS NULL', req.user.id),
+        'Entre na sua conta para continuar.', 401);
+      check(!await get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='card' AND status='pending'", req.user.id),
         'Você já tem um vínculo em andamento.', 409);
-      return startOperation({ kind: 'card', owner: req.user.id, device: reserve(req.body.device), method: 'rfid', minutes: 1 });
+      return startOperation(db, { kind: 'card', owner: req.user.id, device: await reserve(db, req.body.device), method: 'rfid', minutes: 1 });
     });
-    mqtt.arm(op);
+    await mqtt.arm(op);
     res.status(201).json(op);
   });
-  api.post('/card/:id/cancel', (req, res) => {
+  api.post('/card/:id/cancel', async (req, res) => {
     student(req);
-    run(db, "UPDATE operations SET status='cancelled' WHERE id=? AND owner=? AND kind='card' AND status='pending'", req.params.id, req.user.id);
+    await run(db, "UPDATE operations SET status='cancelled' WHERE id=? AND owner=? AND kind='card' AND status='pending'", req.params.id, req.user.id);
     res.json({ ok: true });
   });
-  api.post('/teams/:team/sales', (req, res) => {
+  api.post('/teams/:team/sales', async (req, res) => {
     const team = req.params.team;
-    teamAccess(req, team);
     const cents = amount(req.body.amount);
     const method = req.body.method;
     check(method === 'rfid' || method === 'pix', 'Escolha cartão ou Pix.');
-    const op = transaction(db, () => {
-      expire(db);
-      check(!get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='sale' AND status='pending'", team),
+    const op = await transaction(db, async db => {
+      await teamAccess(db, req, team);
+      await expire(db);
+      check(!await get(db, "SELECT 1 FROM operations WHERE owner=? AND kind='sale' AND status='pending'", team),
         'Conclua ou cancele a cobrança em aberto.', 409);
-      const device = method === 'rfid' ? reserve(get(db, 'SELECT id FROM devices WHERE team=?', team)?.id || '') : null;
-      return startOperation({ kind: 'sale', owner: team, device, method, cents, minutes: 5 });
+      const device = method === 'rfid' ? await reserve(db, (await get(db, 'SELECT id FROM devices WHERE team=?', team))?.id || '') : null;
+      return startOperation(db, { kind: 'sale', owner: team, device, method, cents, minutes: 5 });
     });
-    if (op.device) mqtt.arm(op);
+    if (op.device) await mqtt.arm(op);
     res.status(201).json(op);
   });
-  api.post('/teams/:team/sales/:id/:action', (req, res) => {
+  api.post('/teams/:team/sales/:id/:action', async (req, res) => {
     const { team, id, action } = req.params;
-    teamAccess(req, team);
     check(action === 'pix' || action === 'cancel', 'Ação inválida.', 404);
-    transaction(db, () => {
-      expire(db);
-      const op = operation(id);
+    await transaction(db, async db => {
+      await teamAccess(db, req, team);
+      await expire(db);
+      const op = await operation(db, id);
       check(op?.owner === team && op.kind === 'sale' && op.status === 'pending', 'A cobrança já foi encerrada.', 409);
       if (action === 'pix' && op.method === 'rfid') {
-        run(db, "UPDATE operations SET method='pix', device=NULL, detail=NULL, expires=? WHERE id=?", deadline(5), id);
+        await run(db, "UPDATE operations SET method='pix', device=NULL, detail=NULL, expires=? WHERE id=?", deadline(5), id);
       }
-      if (action === 'cancel') run(db, "UPDATE operations SET status='cancelled' WHERE id=?", id);
+      if (action === 'cancel') await run(db, "UPDATE operations SET status='cancelled' WHERE id=?", id);
     });
     res.json({ ok: true });
   });
   api.get('/teams/:team/sales/:id/qr', async (req, res) => {
-    teamAccess(req, req.params.team);
-    expire(db);
-    const op = operation(req.params.id);
+    await teamAccess(db, req, req.params.team);
+    await expire(db);
+    const op = await operation(db, req.params.id);
     check(op?.owner === req.params.team && op.kind === 'sale' && op.method === 'pix' && op.status === 'pending',
       'QR Code indisponível.', 404);
     res.type('png').send(await QRCode.toBuffer('BANCOVIRTUAL:' + op.id, { width: 264, margin: 3 }));
   });
 
-  function pix(req) {
+  async function pix(db, req) {
     student(req);
-    const op = operation(req.params.id);
+    const op = await operation(db, req.params.id);
     check(op?.kind === 'sale' && op.method === 'pix', 'Cobrança Pix não encontrada.', 404);
     return op;
   }
-  api.get('/pix/:id', (req, res) => {
-    expire(db);
-    const op = pix(req);
+  api.get('/pix/:id', async (req, res) => {
+    await expire(db);
+    const op = await pix(db, req);
     check(op.status === 'pending', 'Esta cobrança foi encerrada.', 409);
-    res.json({ id: op.id, amount: op.amount, name: get(db, 'SELECT name FROM accounts WHERE id=?', op.owner).name });
+    res.json({ id: op.id, amount: op.amount, name: (await get(db, 'SELECT name FROM accounts WHERE id=?', op.owner)).name });
   });
-  api.post('/pix/:id', (req, res) => {
-    transaction(db, () => {
-      expire(db);
-      const op = pix(req);
-      const previous = get(db, 'SELECT payer FROM ledger WHERE id=?', op.id);
+  api.post('/pix/:id', async (req, res) => {
+    await transaction(db, async db => {
+      await expire(db);
+      const op = await pix(db, req);
+      const previous = await get(db, 'SELECT payer FROM ledger WHERE id=?', op.id);
       if (previous?.payer === req.user.id) return;
-      settle(db, op, req.user.id, 'pix');
+      await settle(db, op, req.user.id, 'pix');
     });
     res.json({ ok: true });
   });
