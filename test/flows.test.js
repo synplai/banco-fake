@@ -405,18 +405,29 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   });
   await once(client, 'connect');
   const base = 'bancofeira/v1/' + device.id;
-  await client.subscribeAsync(base + '/arm');
-  let armed;
-  client.on('message', (topic, data) => { armed = JSON.parse(data.toString()); });
+  await client.subscribeAsync([base + '/arm', base + '/status']);
+  let armed, confirmation;
+  client.on('message', (topic, data) => {
+    if (topic.endsWith('/arm')) armed = JSON.parse(data.toString());
+    if (topic.endsWith('/status')) confirmation = JSON.parse(data.toString());
+  });
   const send = (type, op = '', card = '', nonce = randomBytes(16).toString('hex'), key = device.key) =>
     client.publishAsync(base + '/event', JSON.stringify({
       type, op, card, nonce, sig: signature(key, type, device.id, nonce, op, card)
     }), { qos: 1 });
   await seller.request('/teams/' + team.id + '/device', { pairing: device.pairing });
   await eventually(async () => (await admin('/home')).mqtt);
-  await send('hello');
+  const helloNonce = randomBytes(16).toString('hex');
+  await send('hello', '', '', helloNonce);
+  await eventually(() => confirmation?.nonce === helloNonce);
+  assert.equal(confirmation.sig, signature(device.key, 'status', device.id, helloNonce, confirmation.time));
+  assert.ok(Math.abs(Number(confirmation.time) * 1000 - Date.now()) < 5000);
   await eventually(async () => (await admin('/home')).devices[0].online);
   assert.equal((await admin('/home')).devices[0].team, team.id);
+  const confirmed = confirmation;
+  await send('hello', '', '', randomBytes(16).toString('hex'), 'wrong-key');
+  await delay(60);
+  assert.equal(confirmation, confirmed);
 
   const card = 'AABBCCDD';
   const enrollment = await buyer.request('/card', { device: device.id }, 201);

@@ -62,6 +62,8 @@ Alimente o RC522 com 3,3 V. O LED verde usa o GPIO 12 e pisca quando a leitura �
 
 O broker informado já consta nos exemplos: `tokaido.proxy.rlwy.net:17906`. A configuração fornecida usa MQTT em TCP. As mensagens são assinadas com HMAC por maquininha. Para criptografar o transporte, configure um listener TLS no broker, use `mqtts://` no servidor e habilite `MQTT_TLS` com a CA correspondente no firmware. Se o broker exigir credenciais, configure `MQTT_USER` e `MQTT_PASSWORD`. Use o mesmo `MQTT_PREFIX` no servidor e nos terminais. Em um broker compartilhado, use um prefixo exclusivo desta instalação e, se disponível, permissões por tópico.
 
+Se o painel mostrar a maquininha offline, abra a configuração dela e consulte **Conexão**. O Wi-Fi, o MQTT e a confirmação do banco aparecem separadamente. O banco confirma a identidade da maquininha e envia uma hora assinada para sincronizar o relógio. Em MQTT TCP, a conexão pode iniciar antes do NTP.
+
 ## Pix simulado
 
 Em **Minha conta**, **Meu estabelecimento** ou **Conta do banco**, abra **Minhas chaves Pix** para ver e copiar as chaves da conta ou cadastrar uma nova. O simulador aceita chave aleatória, e-mail e celular fictícios, além de CPF fictício nas contas pessoais. O usuário ou o CNPJ cadastrado também funciona como chave.

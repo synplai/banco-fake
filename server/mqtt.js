@@ -54,6 +54,12 @@ export function bridge(db, config, changed) {
         await run(db, 'UPDATE operations SET detail=? WHERE id=?', error.message, current.id);
       }
     });
+    if (type === 'hello' && ready) {
+      const time = String(Math.floor(Date.now() / 1000));
+      client.publish(topic + '/' + device.id + '/status', JSON.stringify({
+        nonce, time, sig: signature(device.key, 'status', device.id, nonce, time)
+      }), { qos: 1 });
+    }
     if (active) send(device, active);
     if (type === 'tap' || device.seen < Date.now() - 25000) changed();
   }

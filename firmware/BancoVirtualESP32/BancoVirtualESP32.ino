@@ -15,6 +15,7 @@
 #include <esp_system.h>
 #include <mbedtls/md.h>
 #include <time.h>
+#include <sys/time.h>
 
 // O Wi-Fi e a identidade da maquininha são configurados no navegador.
 // Altere apenas o MQTT se o servidor usar outro broker ou prefixo.
@@ -63,7 +64,10 @@ void generateIdentity(DeviceSettings &updated);
 DeviceSettings settings{};
 char activeDeviceId[37]{};
 char activeDeviceKey[65]{};
-String eventTopic, armTopic, operation, mqttClientId;
+String eventTopic, armTopic, statusTopic, operation, mqttClientId, pendingHelloNonce;
+std::atomic<bool> mqttConnected{false};
+std::atomic<bool> bankConfirmed{false};
+std::atomic<uint32_t> lastBankConfirmation{0};
 time_t expires = 0;
 uint32_t lastHello = 0;
 uint32_t lastConnect = 0;
@@ -221,6 +225,12 @@ input:not([type=checkbox]){box-sizing:border-box;width:100%;padding:10px;border:
 button{background:#6439d0;color:#fff;font:600 15px system-ui;border:0;border-radius:8px;padding:10px 14px}
 summary{cursor:pointer}small{display:block;color:#534765}.notice{padding:10px;background:#e9e0ff;border-radius:8px}
 </style><main><h1>Maquininha Banco Virtual</h1><p>Configuração local do ESP32</p>)HTML";
+  const bool wifiOnline = WiFi.status() == WL_CONNECTED;
+  const bool bankOnline = mqttConnected && bankConfirmed && millis() - lastBankConfirmation < 25000;
+  page += String("<section><h2>Conexão</h2><p>Wi-Fi: ") + (wifiOnline ? "conectado" : "aguardando conexão") +
+    "</p><p>MQTT: " + (mqttConnected ? "conectado" : "desconectado") +
+    "</p><p>Banco: " + (bankOnline ? "comunicação confirmada" : "aguardando confirmação") +
+    "</p><small>Se o MQTT conectar e o banco não confirmar, confira o ID e a chave cadastrados no site e o prefixo MQTT no Railway.</small></section>";
   if (message.length()) page += String("<p class='notice'>") + escapeHtml(message) + "</p>";
   const String token = String("<input type='hidden' name='token' value='") + portalToken + "'>";
   page += "<section><h2>Wi-Fi de operação</h2><form method='post' action='/wifi'>" + token +
@@ -504,6 +514,7 @@ bool publishEvent(const char *type, const String &op, const String &card) {
   byte random[16];
   esp_fill_random(random, sizeof(random));
   const String nonce = hex(random, sizeof(random), "0123456789abcdef");
+  if (strcmp(type, "hello") == 0) pendingHelloNonce = nonce;
   JsonDocument event;
   event["type"] = type;
   event["nonce"] = nonce;
@@ -516,9 +527,26 @@ bool publishEvent(const char *type, const String &op, const String &card) {
 }
 
 void onMessage(char *topic, byte *payload, unsigned int length) {
-  if (armTopic != topic) return;
+  if (length > 768) return;
   JsonDocument event;
   if (deserializeJson(event, payload, length)) return;
+  if (statusTopic == topic) {
+    const String nonce = event["nonce"] | "";
+    const String timestamp = event["time"] | "";
+    const String proof = event["sig"] | "";
+    if (pendingHelloNonce.isEmpty() || nonce != pendingHelloNonce || timestamp.length() != 10 ||
+        proof != sign(String("status|") + activeDeviceId + "|" + nonce + "|" + timestamp)) return;
+    const time_t serverTime = strtoll(timestamp.c_str(), nullptr, 10);
+    if (serverTime < 1700000000) return;
+    const timeval clock{serverTime, 0};
+    settimeofday(&clock, nullptr);
+    pendingHelloNonce = "";
+    lastBankConfirmation = millis();
+    if (!bankConfirmed) Serial.println("Banco confirmou a maquininha.");
+    bankConfirmed = true;
+    return;
+  }
+  if (armTopic != topic) return;
   const String next = event["op"] | "";
   const String limit = event["expires"] | "";
   const String proof = event["sig"] | "";
@@ -566,6 +594,7 @@ void setup() {
   broker.setSocketTimeout(3);
   eventTopic = String(MQTT_PREFIX) + "/" + activeDeviceId + "/event";
   armTopic = String(MQTT_PREFIX) + "/" + activeDeviceId + "/arm";
+  statusTopic = String(MQTT_PREFIX) + "/" + activeDeviceId + "/status";
   mqttClientId = String("bv-") + sign(String("mqtt-client|") + activeDeviceId).substring(0, 20);
 }
 
@@ -578,7 +607,6 @@ void loop() {
     if (clients != portalClients) {
       portalClients = clients;
       Serial.print("Clientes no Wi-Fi da maquininha: "); Serial.println(portalClients);
-      if (clients && settingsReady && WiFi.status() != WL_CONNECTED) WiFi.disconnect(false, false);
     }
   }
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
@@ -586,35 +614,47 @@ void loop() {
   const bool portalLedOn = portalActive && (!wifiConnected || portalClients > 0) && (now / 500) % 2 == 0;
   digitalWrite(LED_PIN, ledOn || portalLedOn ? HIGH : LOW);
   if (!settingsReady || restartPending) { delay(25); return; }
-  if (!wifiConnected && !portalClients && now - lastWifiAttempt >= 15000) {
+  if (!wifiConnected && now - lastWifiAttempt >= 15000) {
     lastWifiAttempt = now;
     WiFi.reconnect();
   }
-  if (!wifiConnected || time(nullptr) < 1700000000) {
+  if (!wifiConnected) {
+    mqttConnected = false;
+    bankConfirmed = false;
     if (now - lastNetworkNotice >= 8000) {
       lastNetworkNotice = now;
-      Serial.println(wifiConnected ? "Aguardando sincronizacao NTP." : "Aguardando Wi-Fi.");
+      Serial.println("Aguardando Wi-Fi.");
     }
     delay(80);
     return;
   }
   if (!broker.connected()) {
+    mqttConnected = false;
+    bankConfirmed = false;
     if (millis() - lastConnect < 2500) { delay(25); return; }
     lastConnect = millis();
     const char *user = MQTT_USER[0] ? MQTT_USER : nullptr;
     const char *password = MQTT_USER[0] ? MQTT_PASSWORD : nullptr;
+    // O broker em TCP pode conectar antes da sincronização do relógio.
+#if MQTT_TLS
+    if (time(nullptr) < 1700000000) {
+      Serial.println("Aguardando relogio para validar o certificado TLS do MQTT.");
+      return;
+    }
+#endif
     if (!broker.connect(mqttClientId.c_str(), user, password)) {
       Serial.printf("MQTT indisponivel (%d).\n", broker.state());
       return;
     }
-    if (!broker.subscribe(armTopic.c_str(), 1)) {
+    if (!broker.subscribe(armTopic.c_str(), 1) || !broker.subscribe(statusTopic.c_str(), 1)) {
       Serial.println("Nao foi possivel assinar o topico da maquininha.");
       broker.disconnect();
       return;
     }
+    mqttConnected = true;
     publishEvent("hello", "", "");
     lastHello = millis();
-    Serial.println("MQTT conectado. Inicie o vinculo ou a cobranca no site.");
+    Serial.println("MQTT conectado. Aguardando confirmacao do Banco Virtual.");
   }
   broker.loop();
   if (millis() - lastHello >= 8000) {
