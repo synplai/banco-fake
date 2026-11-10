@@ -6,6 +6,7 @@ import {
   requireRule as check, Rule, run, secret, settle, transaction, transfer, uid, verifyPassword
 } from './db.js';
 import { bridge } from './mqtt.js';
+import { keyCandidates, normalizeKey, registeredTypes } from './pix-keys.js';
 
 const web = fileURLToPath(new URL('../web/', import.meta.url));
 const scanner = fileURLToPath(new URL('../node_modules/jsqr/dist/jsQR.js', import.meta.url));
@@ -141,6 +142,7 @@ export async function createApp(db, config = process.env) {
   const devices = async (where = '', ...args) => (await all(db, 'SELECT ' + deviceFields +
     ' FROM devices d LEFT JOIN accounts a ON a.id=d.team ' + where + ' ORDER BY d.name', ...args)).map(publicDevice);
   const operation = (db, id) => get(db, 'SELECT * FROM operations WHERE id=?', id);
+  const chargeFields = 'c.id,c.team,c.description,c.rate,c.amount,c.created,c.paid_at,c.cancelled_at,a.name AS "teamName"';
 
   api.get('/home', async (req, res) => {
     await expire(db);
@@ -148,7 +150,9 @@ export async function createApp(db, config = process.env) {
     if (user.role === 'admin') {
       const accounts = await all(db, "SELECT " + userFields + " FROM accounts WHERE role<>'admin' AND deleted_at IS NULL ORDER BY name");
       const members = await all(db, 'SELECT team,student FROM members');
-      return res.json({ user, accounts, members, devices: await devices(), mqtt: mqtt.ready(), activity: await all(db,
+      return res.json({ user, accounts, members, devices: await devices(), mqtt: mqtt.ready(),
+        charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
+        activity: await all(db,
         'SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName" FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
     }
     const teams = await all(db, 'SELECT a.id,a.name,a.cnpj,a.balance FROM accounts a JOIN members m ON a.id=m.team WHERE m.student=?', user.id);
@@ -156,6 +160,7 @@ export async function createApp(db, config = process.env) {
       team.activity = await activity(db, team.id);
       team.device = (await devices('WHERE d.team=?', team.id))[0] || null;
       team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
+      team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL ORDER BY c.created DESC', team.id);
     }
     res.json({ user, teams, activity: await activity(db, user.id), devices: await devices('WHERE d.team IS NOT NULL'),
       card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
@@ -232,10 +237,12 @@ export async function createApp(db, config = process.env) {
         }
       } else {
         await run(db, 'DELETE FROM members WHERE team=?', id);
+        await run(db, 'UPDATE bank_charges SET cancelled_at=? WHERE team=? AND paid_at IS NULL AND cancelled_at IS NULL', Date.now(), id);
         await run(db, "UPDATE operations SET status='cancelled' WHERE status='pending' AND device IN (SELECT id FROM devices WHERE team=?)", id);
         await run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE team=?', id);
       }
       await run(db, 'DELETE FROM sessions WHERE account=?', id);
+      await run(db, 'DELETE FROM pix_keys WHERE account=?', id);
       await run(db, 'UPDATE accounts SET deleted_at=?,username=NULL,password=NULL,cnpj=NULL,card=NULL WHERE id=?', Date.now(), id);
     });
     res.json({ ok: true });
@@ -243,11 +250,86 @@ export async function createApp(db, config = process.env) {
   api.post('/admin/credit', async (req, res) => {
     manager(req);
     const { account, request } = req.body;
-    check(typeof account === 'string' && await get(db, "SELECT 1 FROM accounts WHERE id=? AND role IN ('student','team') AND deleted_at IS NULL", account),
-      'Selecione um aluno ou um estabelecimento.');
+    check(typeof account === 'string' && account.length, 'Selecione uma conta ou todas as contas.');
     check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
     const cents = amount(req.body.amount);
-    await transaction(db, db => transfer(db, { payee: account, amount: cents, method: 'credit', actor: req.user.id, request }));
+    const count = await transaction(db, async db => {
+      const batch = await get(db, 'SELECT amount,recipients FROM credit_batches WHERE request=?', request);
+      if (batch) {
+        check(account === 'all' && batch.amount === cents, 'Este crédito já foi confirmado com outros dados.', 409);
+        return batch.recipients;
+      }
+      const previous = await get(db, 'SELECT payee,amount FROM ledger WHERE request=?', request);
+      if (previous) {
+        check(previous.payee === account && previous.amount === cents, 'Este crédito já foi confirmado com outros dados.', 409);
+        return 1;
+      }
+      const active = "SELECT id FROM accounts WHERE role IN ('student','team') AND deleted_at IS NULL";
+      const targets = account === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', account);
+      check(targets.length, 'Nenhuma conta ativa selecionada.', 404);
+      for (const target of targets) {
+        await transfer(db, { payee: target.id, amount: cents, method: 'credit', actor: req.user.id,
+          request: account === 'all' ? null : request });
+      }
+      if (account === 'all') await run(db, 'INSERT INTO credit_batches VALUES (?,?,?)', request, cents, targets.length);
+      return targets.length;
+    });
+    res.json({ ok: true, count });
+  });
+  api.post('/bank/charges', async (req, res) => {
+    manager(req);
+    const { team, type, value, request } = req.body;
+    const description = normalize(req.body.description);
+    check(typeof team === 'string' && team.length && description.length >= 2 && description.length <= 80,
+      'Informe o estabelecimento e o nome da cobrança.');
+    check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
+    check(type === 'fixed' || type === 'percent', 'Escolha valor fixo ou percentual.');
+    const rate = type === 'percent' ? value : null;
+    if (type === 'fixed') amount(value);
+    else check(Number.isInteger(rate) && rate > 0 && rate <= 10000, 'Informe um percentual entre 0,01% e 100%.');
+    const count = await transaction(db, async db => {
+      const previous = await all(db, 'SELECT scope,description,rate,amount FROM bank_charges WHERE request=? AND issuer=?', request, req.user.id);
+      if (previous.length) {
+        const saved = previous[0];
+        check(saved.scope === team && saved.description === description && saved.rate === rate && (rate !== null || saved.amount === value),
+          'Este lançamento já foi confirmado com outros dados.', 409);
+        return previous.length;
+      }
+      const active = "SELECT id,balance FROM accounts WHERE role='team' AND deleted_at IS NULL";
+      const targets = team === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', team);
+      check(targets.length, 'Nenhum estabelecimento ativo selecionado.', 404);
+      let count = 0;
+      const created = Date.now();
+      for (const target of targets) {
+        const cents = rate === null ? value : Math.round(target.balance * rate / 10000);
+        if (!cents) continue;
+        await run(db, 'INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created) VALUES (?,?,?,?,?,?,?,?,?)',
+          uid(), request, team, req.user.id, target.id, description, rate, cents, created);
+        count++;
+      }
+      check(count, 'O percentual resultou em R$ 0,00. Escolha um valor fixo ou um percentual maior.');
+      return count;
+    });
+    res.status(201).json({ ok: true, count });
+  });
+  api.post('/bank/charges/:id/pay', async (req, res) => {
+    const id = req.params.id;
+    await transaction(db, async db => {
+      const charge = await get(db, 'SELECT * FROM bank_charges WHERE id=?', id);
+      check(charge, 'Cobrança não encontrada.', 404);
+      await teamAccess(db, req, charge.team);
+      check(!charge.cancelled_at, 'Esta cobrança foi cancelada.', 409);
+      if (charge.paid_at) return;
+      await transfer(db, { id, payer: charge.team, payee: charge.issuer, amount: charge.amount, method: 'fee', actor: req.user.id });
+      await run(db, 'UPDATE bank_charges SET paid_at=? WHERE id=?', Date.now(), id);
+    });
+    res.json({ ok: true, id });
+  });
+  api.post('/bank/charges/:id/cancel', async (req, res) => {
+    manager(req);
+    const result = await run(db, 'UPDATE bank_charges SET cancelled_at=? WHERE id=? AND issuer=? AND paid_at IS NULL AND cancelled_at IS NULL',
+      Date.now(), req.params.id, req.user.id);
+    check(result.changes, 'Esta cobrança já foi encerrada.', 409);
     res.json({ ok: true });
   });
   api.post('/admin/devices', async (req, res) => {
@@ -361,23 +443,60 @@ export async function createApp(db, config = process.env) {
     res.type('png').send(await QRCode.toBuffer('BANCOVIRTUAL:' + op.id, { width: 264, margin: 3 }));
   });
 
-  async function pixPayer(db, req) {
-    const payer = req.body.source ?? req.user.id;
-    check(typeof payer === 'string', 'Conta de origem inválida.');
-    if (payer !== req.user.id) await teamAccess(db, req, payer);
-    return payer;
+  async function pixAccount(db, req, source = req.user.id) {
+    check(typeof source === 'string', 'Conta de origem inválida.');
+    if (source !== req.user.id) await teamAccess(db, req, source);
+    const account = await get(db, 'SELECT id,role,username,cnpj FROM accounts WHERE id=? AND deleted_at IS NULL', source);
+    check(account, 'Conta indisponível.', 404);
+    return account;
   }
+  async function findPixRecipient(db, type, key) {
+    const matches = new Map();
+    for (const [kind, value] of keyCandidates(type, key)) {
+      const fields = 'a.id,a.name,a.role,a.username,a.cnpj';
+      let account;
+      if (kind === 'username') {
+        account = await get(db, 'SELECT ' + fields + ' FROM accounts a WHERE a.username=? AND a.deleted_at IS NULL', value);
+      } else if (kind === 'cnpj') {
+        account = await get(db, 'SELECT ' + fields + ' FROM accounts a WHERE a.cnpj=? AND a.deleted_at IS NULL', value);
+      } else {
+        account = await get(db, 'SELECT ' + fields + ' FROM accounts a JOIN pix_keys k ON k.account=a.id WHERE k.type=? AND k.value=? AND a.deleted_at IS NULL', kind, value);
+      }
+      if (account) matches.set(account.id, account);
+    }
+    check(matches.size > 0, 'Chave Pix não encontrada.', 404);
+    check(matches.size === 1, 'Chave ambígua. Use @ antes do usuário, +55 para celular ou a pontuação do CPF/CNPJ.', 409);
+    return matches.values().next().value;
+  }
+  api.get('/pix/keys', async (req, res) => {
+    const account = await pixAccount(db, req, req.query.source);
+    const keys = await all(db, 'SELECT id,type,value FROM pix_keys WHERE account=? ORDER BY type,value', account.id);
+    const builtin = account.cnpj ? { type: 'cnpj', value: account.cnpj } : { type: 'username', value: '@' + account.username };
+    res.json({ keys: [builtin, ...keys] });
+  });
+  api.post('/pix/keys', async (req, res) => {
+    const { type, source } = req.body;
+    check(registeredTypes.includes(type), 'Escolha um tipo de chave Pix.');
+    const value = type === 'random' ? uid() : normalizeKey(type, req.body.value);
+    check(value, 'Informe uma chave válida para o tipo selecionado.');
+    await transaction(db, async db => {
+      const account = await pixAccount(db, req, source);
+      check(type !== 'cpf' || account.role !== 'team', 'Use o CNPJ do estabelecimento como chave de documento.');
+      check(!await get(db, 'SELECT 1 FROM pix_keys WHERE type=? AND value=?', type, value), 'Esta chave Pix já está cadastrada.', 409);
+      await run(db, 'INSERT INTO pix_keys (id,account,type,value) VALUES (?,?,?,?)', uid(), account.id, type, value);
+    });
+    res.status(201).json({ ok: true });
+  });
+  api.post('/pix/keys/:id/remove', async (req, res) => {
+    await transaction(db, async db => {
+      const account = await pixAccount(db, req, req.body.source);
+      const result = await run(db, 'DELETE FROM pix_keys WHERE id=? AND account=?', req.params.id, account.id);
+      check(result.changes, 'Chave Pix não encontrada nesta conta.', 404);
+    });
+    res.json({ ok: true });
+  });
   api.get('/pix/recipient/:type/:key', async (req, res) => {
-    const { type, key } = req.params;
-    check(type === 'username' || type === 'cnpj', 'Tipo de chave inválido.');
-    const username = key.trim().toLowerCase();
-    const cnpj = key.toUpperCase().replace(/[./\s-]/g, '');
-    check(type === 'username' ? login.test(username) : /^[A-Z0-9]{12}\d{2}$/.test(cnpj), 'Informe um usuário ou CNPJ válido.');
-    const recipient = type === 'username'
-      ? await get(db, "SELECT id,name,role,username FROM accounts WHERE username=? AND role IN ('student','admin') AND deleted_at IS NULL", username)
-      : await get(db, "SELECT id,name,role,cnpj FROM accounts WHERE cnpj=? AND role='team' AND deleted_at IS NULL", cnpj);
-    check(recipient, 'Conta de destino não encontrada.', 404);
-    res.json(recipient);
+    res.json(await findPixRecipient(db, req.params.type, req.params.key));
   });
   api.post('/pix/transfer', async (req, res) => {
     const { recipient, request } = req.body;
@@ -385,20 +504,24 @@ export async function createApp(db, config = process.env) {
     check(typeof recipient === 'string', 'Selecione uma conta de destino.');
     check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
     const key = 'pix:' + req.user.id + ':' + request;
-    await transaction(db, async db => {
-      const payer = await pixPayer(db, req);
+    const id = await transaction(db, async db => {
+      const payer = (await pixAccount(db, req, req.body.source)).id;
       check(payer !== recipient, 'Escolha uma conta diferente da conta de origem.');
-      const previous = await get(db, 'SELECT payer,payee,amount FROM ledger WHERE request=?', key);
+      const previous = await get(db, 'SELECT id,payer,payee,amount FROM ledger WHERE request=?', key);
       if (previous) {
         check(previous.payer === payer && previous.payee === recipient && previous.amount === cents,
           'Este Pix já foi confirmado com outros dados.', 409);
-        return;
+        return previous.id;
       }
-      check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND deleted_at IS NULL', recipient),
-        'Conta de destino não encontrada.', 404);
-      await transfer(db, { payer, payee: recipient, amount: cents, method: 'pix', actor: req.user.id, request: key });
+      if (req.body.key !== undefined) {
+        const resolved = await findPixRecipient(db, 'auto', req.body.key);
+        check(resolved.id === recipient, 'O destinatário mudou. Consulte a chave novamente.', 409);
+      }
+      const id = uid();
+      await transfer(db, { id, payer, payee: recipient, amount: cents, method: 'pix', actor: req.user.id, request: key });
+      return id;
     });
-    res.json({ ok: true });
+    res.json({ ok: true, id });
   });
   async function pix(db, req) {
     const op = await operation(db, req.params.id);
@@ -413,7 +536,7 @@ export async function createApp(db, config = process.env) {
   });
   api.post('/pix/:id', async (req, res) => {
     await transaction(db, async db => {
-      const payer = await pixPayer(db, req);
+      const payer = (await pixAccount(db, req, req.body.source)).id;
       await expire(db);
       const op = await pix(db, req);
       check(payer !== op.owner, 'Escolha uma conta diferente da conta de destino.');
@@ -421,7 +544,41 @@ export async function createApp(db, config = process.env) {
       if (previous?.payer === payer) return;
       await settle(db, op, payer, 'pix', req.user.id);
     });
-    res.json({ ok: true });
+    res.json({ ok: true, id: req.params.id });
+  });
+
+  async function canOperate(db, req, account) {
+    return Boolean(account && (account === req.user.id ||
+      await get(db, 'SELECT 1 FROM members WHERE team=? AND student=?', account, req.user.id)));
+  }
+  const refundable = entry => entry.payer && (entry.method === 'pix' || entry.method === 'rfid');
+  api.get('/activity/:id', async (req, res) => {
+    const entry = await get(db, `SELECT l.id,l.payer,l.payee,l.amount,l.created,l.method,
+      p.name AS "fromName",p.role AS "fromRole",p.username AS "fromUser",p.cnpj AS "fromCnpj",
+      a.name AS "toName",a.role AS "toRole",a.username AS "toUser",a.cnpj AS "toCnpj",
+      p.deleted_at AS "payerDeleted",r.reversal AS "refundId",original.original AS "originalId",c.description
+      FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts a ON a.id=l.payee
+      LEFT JOIN refunds r ON r.original=l.id LEFT JOIN refunds original ON original.reversal=l.id
+      LEFT JOIN bank_charges c ON c.id=l.id
+      WHERE l.id=?`, req.params.id);
+    check(entry, 'Movimentação não encontrada.', 404);
+    const receiver = await canOperate(db, req, entry.payee);
+    check(receiver || req.user.role === 'admin' || await canOperate(db, req, entry.payer), 'Movimentação não encontrada.', 404);
+    res.json({ ...entry, canRefund: Boolean(receiver && refundable(entry) && !entry.refundId && !entry.payerDeleted) });
+  });
+  api.post('/activity/:id/refund', async (req, res) => {
+    const id = await transaction(db, async db => {
+      const entry = await get(db, 'SELECT id,payer,payee,amount,method FROM ledger WHERE id=?', req.params.id);
+      check(entry && await canOperate(db, req, entry.payee), 'Movimentação não encontrada.', 404);
+      check(refundable(entry), 'Esta movimentação não pode ser devolvida.', 409);
+      const previous = await get(db, 'SELECT reversal FROM refunds WHERE original=?', entry.id);
+      if (previous) return previous.reversal;
+      const id = uid();
+      await transfer(db, { id, payer: entry.payee, payee: entry.payer, amount: entry.amount, method: 'refund', actor: req.user.id });
+      await run(db, 'INSERT INTO refunds (original,reversal) VALUES (?,?)', entry.id, id);
+      return id;
+    });
+    res.json({ ok: true, id });
   });
 
   api.use((req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));

@@ -61,6 +61,24 @@ const schema = `
     );
     CREATE INDEX IF NOT EXISTS ledger_payer ON ledger(payer,created);
     CREATE INDEX IF NOT EXISTS ledger_payee ON ledger(payee,created);
+    CREATE TABLE IF NOT EXISTS refunds (
+      original TEXT PRIMARY KEY REFERENCES ledger(id), reversal TEXT NOT NULL UNIQUE REFERENCES ledger(id)
+    );
+    CREATE TABLE IF NOT EXISTS credit_batches (
+      request TEXT PRIMARY KEY, amount BIGINT NOT NULL, recipients INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS bank_charges (
+      id TEXT PRIMARY KEY, request TEXT NOT NULL, scope TEXT NOT NULL,
+      issuer TEXT NOT NULL REFERENCES accounts(id), team TEXT NOT NULL REFERENCES accounts(id),
+      description TEXT NOT NULL, rate INTEGER, amount BIGINT NOT NULL CHECK(amount > 0),
+      created BIGINT NOT NULL, paid_at BIGINT, cancelled_at BIGINT, UNIQUE(request,team)
+    );
+    CREATE INDEX IF NOT EXISTS bank_charges_team ON bank_charges(team,created);
+    CREATE TABLE IF NOT EXISTS pix_keys (
+      id TEXT PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(id), type TEXT NOT NULL,
+      value TEXT NOT NULL, UNIQUE(type,value)
+    );
+    CREATE INDEX IF NOT EXISTS pix_keys_account ON pix_keys(account);
     CREATE TABLE IF NOT EXISTS tap_events (
       device TEXT NOT NULL, nonce TEXT NOT NULL, created BIGINT NOT NULL, PRIMARY KEY(device,nonce)
     );

@@ -105,18 +105,19 @@ function loginView() {
     '<div class="login-note">' + icon('card') + '<span>Todos os saldos e pagamentos são fictícios.</span></div></div></section></main>';
 }
 
+const methods = { credit: 'Crédito do gestor', pix: 'Pix', rfid: 'Cartão RFID', refund: 'Devolução', fee: 'Cobrança do banco' };
 function activity(rows, owner) {
   if (!rows.length) return empty('Tudo pronto por aqui', 'As movimentações aparecem neste espaço.');
-  const methods = { credit: 'Crédito do gestor', pix: 'Pix', rfid: 'Cartão RFID' };
   return '<ul class="activity">' + rows.map(row => {
     const outgoing = row.payer === owner;
     const title = owner ? (outgoing ? row.toName : row.fromName || 'Crédito do gestor') : (row.fromName ? row.fromName + ' → ' + row.toName : row.toName);
-    return '<li><span class="tile-icon ' + (outgoing ? 'spent' : 'received') + '">' + icon(outgoing ? 'up' : 'down') + '</span><div><strong>' +
-      esc(title) + '</strong><small>' + methods[row.method] + ' · ' + date(row.created) + '</small></div><b class="' + (outgoing ? '' : 'positive') + '">' +
-      (owner ? (outgoing ? '− ' : '+ ') : '') + money(row.amount) + '</b></li>';
+    return '<li><button type="button" class="activity-row" data-action="receipt" data-id="' + esc(row.id) + '"><span class="tile-icon ' + (outgoing ? 'spent' : 'received') + '">' + icon(outgoing ? 'up' : 'down') + '</span><span><strong>' +
+      esc(title) + '</strong><small>' + methods[row.method] + ' · ' + date(row.created) + '</small></span><b class="' + (outgoing ? '' : 'positive') + '">' +
+      (owner ? (outgoing ? '− ' : '+ ') : '') + money(row.amount) + '</b>' + icon('arrow') + '</button></li>';
   }).join('') + '</ul>';
 }
-const adminNav = [['overview', 'Visão geral', 'home'], ['students', 'Alunos', 'users'], ['teams', 'Estabelecimentos', 'shop'], ['devices', 'Maquininhas', 'device']];
+const adminNav = [['overview', 'Visão geral', 'home'], ['students', 'Alunos', 'users'], ['teams', 'Estabelecimentos', 'shop'],
+  ['charges', 'Cobranças', 'history'], ['devices', 'Maquininhas', 'device']];
 const studentNav = [['overview', 'Minha conta', 'home'], ['teams', 'Meu estabelecimento', 'shop']];
 const navItems = () => state.data.user.role === 'admin' ? adminNav : studentNav.filter(item => item[0] !== 'teams' || state.data.teams.length);
 function render() {
@@ -148,7 +149,7 @@ function drawPage() {
 const intro = (eyebrow, title, subtitle, right = '') => '<div class="intro"><div><span class="eyebrow">' + esc(eyebrow) + '</span><h1>' + esc(title) + '</h1><p>' + esc(subtitle) + '</p></div>' + right + '</div>';
 const metrics = (label, value, description, type, style) => '<div class="metric"><span class="tile-icon ' + style + '">' + icon(type) + '</span><span>' + label + '</span><strong>' + value + '</strong><small>' + description + '</small></div>';
 function adminPage() {
-  const { accounts, members, devices, mqtt, activity: rows } = state.data;
+  const { accounts, members, devices, mqtt, charges, activity: rows } = state.data;
   const students = accounts.filter(x => x.role === 'student');
   const teams = accounts.filter(x => x.role === 'team');
   if (state.page === 'overview') {
@@ -158,9 +159,9 @@ function adminPage() {
       metrics('Estabelecimentos', teams.length, 'CNPJs fictícios cadastrados', 'shop', 'lime') +
       metrics('Maquininhas', devices.length, devices.filter(x => x.online).length + ' online agora', 'device', 'peach') +
       metrics('Saldo em circulação', money(accounts.reduce((sum, x) => sum + x.balance, state.data.user.balance)), 'Total nas contas ativas', 'card', 'blue') + '</div>' +
-      section('Conta do gestor', 'Saldo disponível · ' + money(state.data.user.balance),
+      section('Conta do banco', 'Saldo disponível · ' + money(state.data.user.balance),
         '<div class="panel-actions pix-actions">' + button('Enviar Pix', 'pix-send', 'up', 'ghost') +
-        button('Pagar cobrança', 'pix', 'pix', 'ghost') + '</div>') +
+        button('Pagar cobrança', 'pix', 'pix', 'ghost') + button('Minhas chaves Pix', 'pix-keys', null, 'ghost') + '</div>') +
       section('Movimentações recentes', 'Créditos e pagamentos de todas as contas', activity(rows), pill('Simulação', 'neutral'));
   }
   if (state.page === 'students') return intro('CADASTROS', 'Alunos', 'Veja quem já vinculou o cartão e gerencie as contas.', button('Cadastrar aluno', 'student', 'plus')) +
@@ -175,6 +176,8 @@ function adminPage() {
       'CNPJ ' + x.cnpj + ' · ' + (members.filter(m => m.team === x.id).map(m => students.find(s => s.id === m.student)?.name).join(', ') || 'Sem alunos autorizados'), 'shop',
       '<b>' + money(x.balance) + '</b>' + button('Crédito', 'credit', 'plus', 'ghost', x.id) +
       button('Editar', 'team', 'edit', 'ghost', x.id) + button('Excluir', 'delete-account', 'trash', 'danger-ghost', x.id))).join('') + '</div>' : empty('Nenhum estabelecimento cadastrado', 'Cadastre pelo menos um aluno para operar a conta.', 'shop'));
+  if (state.page === 'charges') return intro('CONTA DO BANCO', 'Cobranças', 'Lance taxas, impostos simulados ou aluguel para os estabelecimentos.', button('Nova cobrança', 'charge-new', 'plus')) +
+    section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true));
   return intro('CARTÃO E CONECTIVIDADE', 'Maquininhas', 'Acompanhe a conexão e o CNPJ vinculado a cada ESP32.', button('Registrar maquininha', 'device', 'plus')) +
     section('Terminais RFID', 'Conexão do servidor com o broker MQTT', devices.length ? '<div class="records">' +
       devices.map(d => record(d.name, d.teamName ? d.teamName + ' · CNPJ ' + teams.find(x => x.id === d.team)?.cnpj : 'Sem estabelecimento vinculado', 'device',
@@ -183,6 +186,20 @@ function adminPage() {
 }
 function record(title, subtitle, type, actions) {
   return '<div class="record"><span class="tile-icon purple">' + icon(type) + '</span><div class="record-name"><strong>' + esc(title) + '</strong><small>' + esc(subtitle) + '</small></div><div class="record-actions">' + actions + '</div></div>';
+}
+function bankCharges(charges, manager = false) {
+  if (!charges?.length) return empty(manager ? 'Nenhuma cobrança lançada' : 'Nenhuma cobrança pendente',
+    manager ? 'As cobranças lançadas pelo banco aparecem aqui.' : 'Taxas e outras cobranças do banco aparecem aqui.');
+  return '<div class="records">' + charges.map(charge => {
+    const status = charge.paid_at ? 'Paga' : charge.cancelled_at ? 'Cancelada' : 'Pendente';
+    const basis = charge.rate === null ? 'Valor fixo' : (charge.rate / 100).toLocaleString('pt-BR') + '% sobre o saldo no lançamento';
+    const description = [manager ? charge.teamName : '', basis, date(charge.created)].filter(Boolean).join(' · ');
+    const action = charge.paid_at ? button('Comprovante', 'receipt', null, 'ghost', charge.id) : charge.cancelled_at ? '' :
+      manager ? button('Cancelar', 'charge-cancel', null, 'danger-ghost', charge.id) :
+        button('Pagar', 'charge-pay', 'pix', 'primary', charge.id);
+    return record(charge.description, description, 'history', '<b>' + money(charge.amount) + '</b>' +
+      pill(status, charge.paid_at ? 'good' : 'neutral') + action);
+  }).join('') + '</div>';
 }
 function studentPage() {
   const { user, teams, activity: rows, card } = state.data;
@@ -196,8 +213,9 @@ function studentPage() {
     (state.balance ? money(user.balance) : 'R$ ••••') + '<button class="icon-btn" data-action="balance" aria-label="' +
     (state.balance ? 'Ocultar saldo' : 'Mostrar saldo') + '">' + icon('eye') + '</button></div><p>Reais fictícios · Conta pessoal</p></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div></div>' +
     '<section class="panel quick"><h2>O que vamos fazer?</h2><div class="quick-grid">' +
-    '<button data-action="pix-send"><span class="tile-icon lime">' + icon('up') + '</span><strong>Enviar Pix</strong><small>Por usuário ou CNPJ</small></button>' +
+    '<button data-action="pix-send"><span class="tile-icon lime">' + icon('up') + '</span><strong>Enviar Pix</strong><small>Por chave Pix</small></button>' +
     '<button data-action="pix"><span class="tile-icon lime">' + icon('pix') + '</span><strong>Pagar cobrança</strong><small>QR Code ou código Pix</small></button>' +
+    '<button data-action="pix-keys"><span class="tile-icon purple">' + icon('plus') + '</span><strong>Minhas chaves Pix</strong><small>Criar ou copiar</small></button>' +
     '<button data-action="card"><span class="tile-icon purple">' + icon('card') + '</span><strong>Vincular cartão</strong><small>Pagamento RFID</small></button></div></section></div>' +
     section('Meu cartão', cardMessage, isPending ? '<div class="panel-actions">' + button('Cancelar vínculo', 'card-cancel', null, 'ghost', card.id) + '</div>' : '',
       pill(isPending ? 'Aguardando' : user.hasCard ? 'Vinculado' : 'Sem cartão', user.hasCard && !isPending ? 'good' : 'neutral')) +
@@ -212,6 +230,7 @@ function teamPage(team) {
     '<div class="student-grid"><div class="hero balance-hero"><div><span class="eyebrow"><i></i> SALDO DO ESTABELECIMENTO</span><div class="balance-value">' +
     money(team.balance) + '</div><p>Reais fictícios · Conta comercial</p><div class="pix-actions">' +
     button('Enviar Pix', 'pix-send', 'up', 'ghost', team.id) + button('Pagar cobrança', 'pix', 'pix', 'ghost', team.id) +
+    button('Minhas chaves Pix', 'pix-keys', null, 'ghost', team.id) +
     '</div></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div></div>' +
     section('Maquininha', team.device?.name || 'Vincule o leitor RFID do estabelecimento.', team.device ? '' : '<div class="panel-actions">' +
     button('Vincular maquininha', 'pair', 'device', 'ghost', team.id) + '</div>', team.device ? pill(team.device.online ? 'Online' : 'Offline', team.device.online ? 'good' : 'neutral') : '') + '</div>' +
@@ -224,6 +243,7 @@ function teamPage(team) {
         '</div><div class="panel-actions">' + button('Cancelar cobrança', 'sale-cancel', null, 'ghost', sale.id) + '</div>', pill(sale.method === 'pix' ? 'Pix' : 'Cartão RFID', 'neutral')) :
       sale?.status === 'paid' ? '<div class="confirmation">' + icon('check') + '<span>Pagamento recebido</span><strong>' + money(sale.amount) + '</strong></div>' :
       sale?.status === 'expired' ? '<div class="confirmation neutral">A última cobrança expirou. Você já pode criar outra.</div>' : '') +
+    section('Cobranças do banco', 'Consulte e pague com o saldo do estabelecimento.', bankCharges(team.charges)) +
     section('Extrato do estabelecimento', 'Créditos, vendas e pagamentos', activity(team.activity, team.id));
 }
 
@@ -312,32 +332,190 @@ function pixAccount(id) {
   return account;
 }
 function pixOriginLabel(account) {
-  const label = account.cnpj ? 'Estabelecimento' : account.role === 'admin' ? 'Conta do gestor' : 'Conta pessoal';
+  const label = account.cnpj ? 'Estabelecimento' : account.role === 'admin' ? 'Conta do banco' : 'Conta pessoal';
   return label + ' · ' + account.name;
+}
+function paymentAction(path, payload, title) {
+  onForm(async (_, target) => {
+    const feedback = target.querySelector('.payment-feedback');
+    feedback.replaceChildren();
+    try {
+      const result = await api(path, payload);
+      if (modal.open && target.isConnected) {
+        showDialog(title, 'Movimentação registrada no Banco Virtual.',
+          '<div class="payment-result success" role="status">' + icon('check') + '<strong>' + esc(title) + '</strong></div>' +
+          '<div class="result-actions">' + button('Ver comprovante', 'receipt', 'history', 'primary', result.id) +
+          button('Fechar', 'close', null, 'ghost') + '</div>');
+      }
+      await refresh(true);
+    } catch (error) {
+      feedback.innerHTML = '<div class="payment-result failure" role="alert">' + icon('close') +
+        '<strong>Operação não confirmada</strong><p>' + esc(error.status ? error.message : 'Confira a conexão e tente novamente.') + '</p></div>';
+    }
+  });
 }
 function confirmPix(account, name, amount, path, payload) {
   showDialog('Confirmar Pix', 'Confira a origem, o destinatário e o valor.', form(
     '<div class="key-value"><span>PARA ' + esc(name) + '</span><strong>' + money(amount) + '</strong></div>' +
-    '<p class="field-help">Sai de ' + esc(pixOriginLabel(account)) + '</p>', 'Confirmar Pix'));
-  onForm(() => complete(path, { ...payload, source: account.id }, 'Pix pago com sucesso.'));
+    '<p class="field-help">Sai de ' + esc(pixOriginLabel(account)) + '</p><div class="payment-feedback"></div>', 'Confirmar Pix'));
+  paymentAction(path, { ...payload, source: account.id }, 'Pix enviado');
 }
 function sendPixDialog(account) {
-  const types = [{ id: 'username', name: 'Usuário da conta' }, { id: 'cnpj', name: 'CNPJ do estabelecimento' }];
   showDialog('Enviar Pix', 'Sai de ' + pixOriginLabel(account), form(
-    select('Tipo de destinatário', 'type', types, 'username') +
-    input('Usuário ou CNPJ', 'key', 'placeholder="Ex. aluno1 ou 00.000.000/0001-00" maxlength="40" autocomplete="off"') +
+    input('Chave Pix', 'key', 'placeholder="Cole ou digite a chave" maxlength="150" autocomplete="off" autocapitalize="none"') +
+    '<div class="recipient-preview" role="status"></div>' +
     input('Valor em reais', 'value', 'inputmode="decimal" placeholder="25,00"'), 'Revisar Pix'));
+  const target = modal.querySelector('form');
+  const field = target.elements.key;
+  const preview = target.querySelector('.recipient-preview');
+  const review = target.querySelector('button');
+  let timer, revision = 0, match;
+  review.disabled = true;
+  field.addEventListener('input', () => {
+    clearTimeout(timer);
+    const version = ++revision;
+    const key = field.value.trim();
+    match = null;
+    review.disabled = true;
+    preview.textContent = '';
+    if (key.length < 3) return;
+    timer = setTimeout(async () => {
+      if (!modal.open || !target.isConnected) return;
+      preview.textContent = 'Consultando chave…';
+      try {
+        const recipient = await api('/pix/recipient/auto/' + encodeURIComponent(key));
+        if (version !== revision || !modal.open || !target.isConnected) return;
+        if (recipient.id === account.id) throw new Error('Escolha uma conta diferente da conta de origem.');
+        const detail = recipient.cnpj ? 'CNPJ ' + recipient.cnpj : '@' + recipient.username;
+        match = { key, recipient, detail };
+        preview.innerHTML = '<strong>' + esc(recipient.name) + '</strong><small>' + esc(detail) + ' · Banco Virtual</small>';
+        review.disabled = false;
+      } catch (error) {
+        if (version === revision && target.isConnected) preview.textContent = error.message;
+      }
+    }, 350);
+  });
   onForm(async (data, target) => {
     const amount = cents(data.value);
     if (amount <= 0) throw new Error('Informe um valor maior que zero.');
-    const key = data.key.trim().replace(/^@/, '');
-    if (!key) throw new Error('Informe o usuário ou CNPJ do destinatário.');
-    const recipient = await api('/pix/recipient/' + data.type + '/' + encodeURIComponent(key));
-    if (recipient.id === account.id) throw new Error('Escolha uma conta diferente da conta de origem.');
+    if (!match || match.key !== data.key.trim()) throw new Error('Consulte a chave antes de revisar o Pix.');
     if (!modal.open || !target.isConnected) return;
-    const name = recipient.name + (recipient.username ? ' · @' + recipient.username : ' · CNPJ ' + recipient.cnpj);
-    confirmPix(account, name, amount, '/pix/transfer', { recipient: recipient.id, amount, request: requestId() });
+    confirmPix(account, match.recipient.name + ' · ' + match.detail, amount, '/pix/transfer',
+      { recipient: match.recipient.id, key: match.key, amount, request: requestId() });
   });
+}
+const keyLabels = { username: 'Nome de usuário', cnpj: 'CNPJ fictício', random: 'Chave aleatória', email: 'E-mail fictício', phone: 'Celular fictício', cpf: 'CPF fictício' };
+async function keysDialog(account) {
+  const { keys } = await api('/pix/keys?source=' + encodeURIComponent(account.id));
+  showDialog('Minhas chaves Pix', pixOriginLabel(account), '<ul class="key-list">' + keys.map(key =>
+    '<li><div><strong>' + keyLabels[key.type] + '</strong><code>' + esc(key.value) + '</code></div><div class="key-actions">' +
+    button('Copiar', 'copy', null, 'ghost', key.value) + (key.id ? '<button type="button" class="btn danger-ghost" data-remove-key="' +
+      esc(key.id) + '">Remover</button>' : '') + '</div></li>').join('') +
+    '</ul><button type="button" class="btn primary" data-new-key>' + icon('plus') + 'Cadastrar chave Pix</button>');
+  modal.querySelector('[data-new-key]').addEventListener('click', () => createKeyDialog(account));
+  for (const remove of modal.querySelectorAll('[data-remove-key]')) remove.addEventListener('click', () => {
+    const key = keys.find(item => item.id === remove.dataset.removeKey);
+    showDialog('Remover chave Pix', key.value, form('', 'Remover chave', 'danger'));
+    onForm(async () => {
+      await api('/pix/keys/' + key.id + '/remove', { source: account.id });
+      await keysDialog(account);
+      notice('Chave removida.');
+    });
+  });
+}
+function createKeyDialog(account) {
+  const types = (account.cnpj ? ['random', 'email', 'phone'] : ['random', 'email', 'phone', 'cpf'])
+    .map(id => ({ id, name: keyLabels[id] }));
+  showDialog('Cadastrar chave Pix', 'Use dados fictícios nesta simulação.', form(
+    select('Tipo de chave', 'type', types, 'random') +
+    '<div data-key-value hidden>' + input('Valor da chave', 'value', 'maxlength="150" autocomplete="off" autocapitalize="none"', false) + '</div>' +
+    '<p class="field-help" data-key-help></p>', 'Cadastrar chave'));
+  const target = modal.querySelector('form');
+  const examples = { email: 'aluno@example.com', phone: '+55 (11) 90000-0000', cpf: '000.000.000-00' };
+  function updateKeyField() {
+    const type = target.elements.type.value;
+    const generated = !examples[type];
+    target.querySelector('[data-key-value]').hidden = generated;
+    target.elements.value.required = !generated;
+    target.elements.value.placeholder = examples[type] || '';
+    target.querySelector('[data-key-help]').textContent = type === 'random' ? 'O banco gera uma chave exclusiva para esta conta.' : '';
+  }
+  target.elements.type.addEventListener('change', updateKeyField);
+  updateKeyField();
+  onForm(async data => {
+    await api('/pix/keys', { ...data, source: account.id });
+    await keysDialog(account);
+    notice('Chave cadastrada.');
+  });
+}
+function receiptParty(name, role, username, cnpj) {
+  const label = role === 'team' ? 'Estabelecimento' : role === 'admin' ? 'Conta do banco' : role === 'student' ? 'Conta pessoal' : 'Banco Virtual';
+  return esc(name || 'Banco Virtual') + '<small>' + label + (cnpj ? ' · CNPJ ' + esc(cnpj) : username ? ' · @' + esc(username) : '') + '</small>';
+}
+async function receiptDialog(id) {
+  const entry = await api('/activity/' + id);
+  const title = entry.method === 'refund' ? 'Comprovante de devolução' : 'Comprovante';
+  const related = entry.refundId ? button('Ver devolução', 'receipt', 'history', 'ghost', entry.refundId) :
+    entry.originalId ? button('Ver movimentação original', 'receipt', 'history', 'ghost', entry.originalId) : '';
+  const refund = entry.canRefund ? button(entry.method === 'rfid' ? 'Estornar venda' : 'Devolver valor', 'refund', null, 'danger-ghost', entry.id) : '';
+  showDialog(title, 'Banco Virtual · Operação simulada', '<div class="key-value"><span>' + methods[entry.method] +
+    '</span><strong>' + money(entry.amount) + '</strong></div><dl class="receipt-details">' +
+    (entry.description ? '<dt>Descrição</dt><dd>' + esc(entry.description) + '</dd>' : '') +
+    '<dt>Status</dt><dd>' + (entry.refundId ? 'Valor devolvido' : 'Concluída') + '</dd>' +
+    '<dt>Data e hora</dt><dd>' + date(entry.created) + '</dd>' +
+    '<dt>Origem</dt><dd>' + receiptParty(entry.fromName, entry.fromRole, entry.fromUser, entry.fromCnpj) + '</dd>' +
+    '<dt>Destino</dt><dd>' + receiptParty(entry.toName, entry.toRole, entry.toUser, entry.toCnpj) + '</dd>' +
+    '<dt>ID da transação</dt><dd><code>' + esc(entry.id) + '</code></dd></dl>' +
+    '<div class="result-actions">' + refund + related + button('Copiar ID', 'copy', null, 'ghost', entry.id) + '</div>');
+  return entry;
+}
+async function refundDialog(id) {
+  const entry = await api('/activity/' + id);
+  if (!entry.canRefund) throw new Error('Esta movimentação não está disponível para devolução.');
+  const label = entry.method === 'rfid' ? 'Estornar venda' : 'Devolver valor';
+  showDialog(label, 'O valor integral voltará para a conta de origem.', form(
+    '<div class="key-value"><span>PARA ' + esc(entry.fromName) + '</span><strong>' + money(entry.amount) + '</strong></div>' +
+    '<p class="field-help">Sai do saldo de ' + esc(entry.toName) + '.</p><div class="payment-feedback"></div>',
+    'Confirmar devolução', 'danger'));
+  paymentAction('/activity/' + id + '/refund', {}, 'Valor devolvido');
+}
+function newChargeDialog(accounts) {
+  const teams = accounts.filter(account => account.role === 'team');
+  if (!teams.length) throw new Error('Cadastre um estabelecimento para lançar uma cobrança.');
+  const request = requestId();
+  showDialog('Nova cobrança', 'O pagamento será recebido na conta do banco.', form(
+    select('Estabelecimento', 'team', [{ id: 'all', name: 'Todos os estabelecimentos' }, ...teams]) +
+    input('Descrição da cobrança', 'description', 'maxlength="80" placeholder="Ex. Taxa de maquininha, IPTU ou aluguel"') +
+    select('Forma de cálculo', 'type', [{ id: 'fixed', name: 'Valor fixo' }, { id: 'percent', name: 'Percentual do saldo' }], 'fixed') +
+    input('<span data-charge-label>Valor em reais</span>', 'value', 'inputmode="decimal" placeholder="25,00"') +
+    '<p class="field-help" data-charge-help></p>', 'Lançar cobrança'));
+  const target = modal.querySelector('form');
+  function update() {
+    const percent = target.elements.type.value === 'percent';
+    target.querySelector('[data-charge-label]').textContent = percent ? 'Percentual (%)' : 'Valor em reais';
+    target.elements.value.placeholder = percent ? 'Ex. 5,00' : '25,00';
+    target.querySelector('[data-charge-help]').textContent = percent
+      ? 'O valor é calculado sobre o saldo disponível no lançamento. Resultados de R$ 0,00 são ignorados.'
+      : 'O valor é aplicado integralmente a cada estabelecimento selecionado.';
+  }
+  target.elements.type.addEventListener('change', update);
+  update();
+  onForm(async data => {
+    const result = await api('/bank/charges', { team: data.team, type: data.type, description: data.description,
+      value: cents(data.value), request });
+    modal.close();
+    notice(result.count === 1 ? 'Cobrança lançada.' : result.count + ' cobranças lançadas.');
+    await refresh(true);
+  });
+}
+function payChargeDialog(id, teams) {
+  const team = teams.find(account => account.charges?.some(charge => charge.id === id));
+  const charge = team?.charges.find(charge => charge.id === id);
+  if (!charge) throw new Error('Esta cobrança não está mais disponível.');
+  showDialog('Pagar cobrança do banco', charge.description, form(
+    '<div class="key-value"><span>PARA CONTA DO BANCO</span><strong>' + money(charge.amount) + '</strong></div>' +
+    '<p class="field-help">Sai do saldo de ' + esc(team.name) + '.</p><div class="payment-feedback"></div>', 'Confirmar pagamento'));
+  paymentAction('/bank/charges/' + id + '/pay', {}, 'Cobrança paga');
 }
 async function previewPix(value, account) {
   stopCamera();
@@ -482,10 +660,26 @@ document.addEventListener('click', async e => {
       case 'credit': {
         if (!accounts.length) throw new Error('Cadastre um aluno ou um estabelecimento para liberar saldo.');
         const request = requestId();
-        showDialog('Liberar saldo', 'Adicione reais fictícios a uma conta do banco.', form(
-          select('Conta de destino', 'account', accounts.map(x => ({ ...x, name: x.name + (x.role === 'team' ? ' · Estabelecimento' : ' · Aluno') })), id) +
-          input('Valor em reais', 'value', 'inputmode="decimal" placeholder="25,00"'), 'Confirmar crédito'));
-        onForm(data => complete('/admin/credit', { account: data.account, amount: cents(data.value), request }, 'Saldo liberado.'));
+        const options = [{ id: 'all', name: 'Todas as contas (alunos e estabelecimentos)' },
+          ...accounts.map(x => ({ id: x.id, name: x.name + (x.role === 'team' ? ' · Estabelecimento' : ' · Aluno') }))];
+        showDialog('Liberar saldo', 'O valor informado será creditado em cada conta selecionada.', form(
+          select('Conta de destino', 'account', options, id) +
+          input('Valor por conta', 'value', 'inputmode="decimal" placeholder="25,00"') +
+          '<p class="field-help" data-credit-summary></p>', 'Confirmar crédito'));
+        const target = modal.querySelector('form');
+        target.addEventListener('input', () => {
+          const summary = target.querySelector('[data-credit-summary]');
+          summary.textContent = '';
+          if (target.elements.account.value !== 'all') return;
+          try { summary.textContent = accounts.length + ' contas · Total de ' + money(cents(target.elements.value.value) * accounts.length); }
+          catch { summary.textContent = accounts.length + ' contas ativas.'; }
+        });
+        onForm(async data => {
+          const result = await api('/admin/credit', { account: data.account, amount: cents(data.value), request });
+          modal.close();
+          notice(data.account === 'all' ? 'Saldo liberado em ' + result.count + ' conta(s).' : 'Saldo liberado.');
+          await refresh(true);
+        });
         break;
       }
       case 'device':
@@ -539,6 +733,18 @@ document.addEventListener('click', async e => {
       case 'card-cancel': await complete('/card/' + id + '/cancel', {}, 'Vínculo cancelado.'); break;
       case 'pix-send': sendPixDialog(pixAccount(id)); break;
       case 'pix': pixDialog(pixAccount(id)); break;
+      case 'pix-keys': await keysDialog(pixAccount(id)); break;
+      case 'receipt': await receiptDialog(id); break;
+      case 'refund': await refundDialog(id); break;
+      case 'charge-new': newChargeDialog(accounts); break;
+      case 'charge-pay': payChargeDialog(id, teams); break;
+      case 'charge-cancel': {
+        const charge = state.data.charges.find(item => item.id === id);
+        if (!charge) break;
+        showDialog('Cancelar cobrança', charge.description, form('', 'Cancelar cobrança', 'danger'));
+        onForm(() => complete('/bank/charges/' + id + '/cancel', {}, 'Cobrança cancelada.'));
+        break;
+      }
       case 'camera': await startCamera(b); break;
       case 'copy':
         if (navigator.clipboard) await navigator.clipboard.writeText(id);

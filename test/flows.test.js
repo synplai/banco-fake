@@ -264,6 +264,91 @@ test('Pix direto e por cobrança entre contas pessoais e estabelecimentos', asyn
   assert.equal(managerHome.activity.filter(row => row.method === 'pix').length, 8);
 });
 
+test('chaves Pix são reconhecidas, comprovantes são privados e devoluções são integrais', async t => {
+  const { admin, students, team, credit } = await setup({}, t, 1);
+  const [seller, buyer, outsider] = students;
+  const lookup = (actor, key, status) => actor.request('/pix/recipient/auto/' + encodeURIComponent(key), undefined, status);
+  assert.equal((await lookup(buyer, '00.000.000/0001-90')).id, team.id);
+  assert.equal((await lookup(buyer, 'ALUNO1')).id, seller.id);
+  await buyer.request('/pix/keys', { source: team.id, type: 'random' }, 403);
+  await seller.request('/pix/keys', { source: team.id, type: 'random' }, 201);
+  const keys = (await seller.request('/pix/keys?source=' + team.id)).keys;
+  const random = keys.find(key => key.type === 'random');
+  assert.equal(keys.find(key => key.type === 'cnpj').value, team.cnpj);
+  assert.equal((await lookup(buyer, random.value)).id, team.id);
+  await seller.request('/pix/keys', { type: 'email', value: 'Aluno@Example.com' }, 201);
+  await buyer.request('/pix/keys', { type: 'email', value: 'aluno@example.com' }, 409);
+  await buyer.request('/pix/keys', { type: 'phone', value: '(11) 90000-0000' }, 201);
+  await outsider.request('/pix/keys', { type: 'cpf', value: '119.000.000-00' }, 201);
+  await lookup(seller, '11900000000', 409);
+  assert.equal((await lookup(seller, '+5511900000000')).id, buyer.id);
+  assert.equal((await lookup(seller, '119.000.000-00')).id, outsider.id);
+  const email = (await seller.request('/pix/keys')).keys.find(key => key.type === 'email');
+  assert.equal((await lookup(buyer, email.value)).id, seller.id);
+
+  await credit(buyer.id, 1000);
+  const transfer = { recipient: seller.id, key: email.value, amount: 300, request: randomBytes(16).toString('hex') };
+  const { id } = await buyer.request('/pix/transfer', transfer);
+  const receipt = '/activity/' + id;
+  await outsider.request(receipt, undefined, 404);
+  await buyer.request(receipt + '/refund', {}, 404);
+  assert.equal((await buyer.request(receipt)).canRefund, false);
+  assert.equal((await seller.request(receipt)).canRefund, true);
+  await seller.request('/pix/transfer', { recipient: team.id, amount: 200, request: randomBytes(16).toString('hex') });
+  await seller.request(receipt + '/refund', {}, 409);
+  await credit(seller.id, 200);
+  const [first, second] = await Promise.all([
+    seller.request(receipt + '/refund', {}), seller.request(receipt + '/refund', {})
+  ]);
+  assert.equal(first.id, second.id);
+  assert.equal((await seller.request(receipt)).refundId, first.id);
+  const reversal = await buyer.request('/activity/' + first.id);
+  assert.equal(reversal.originalId, id);
+  assert.equal(reversal.amount, 300);
+  assert.equal(reversal.method, 'refund');
+  assert.equal((await buyer.request('/home')).user.balance, 1000);
+  assert.equal((await admin('/home')).activity.filter(row => row.method === 'refund').length, 1);
+  await seller.request('/pix/keys/' + email.id + '/remove', {});
+  await outsider.request('/pix/keys', { type: 'email', value: email.value }, 201);
+  await buyer.request('/pix/transfer', { ...transfer, request: randomBytes(16).toString('hex') }, 409);
+});
+
+test('crédito em todas as contas e cobranças fixas ou percentuais para CNPJ', async t => {
+  const { admin, students, team, credit } = await setup({}, t, 1);
+  const [seller, second, outsider] = students;
+  await admin('/admin/teams', { name: 'Outra oficina', cnpj: '00000000000199', members: [second.id] }, 201);
+  const other = (await second.request('/home')).teams[0];
+  const bulk = { account: 'all', amount: 1000, request: randomBytes(16).toString('hex') };
+  assert.equal((await admin('/admin/credit', bulk)).count, 6);
+  assert.equal((await admin('/admin/credit', bulk)).count, 6);
+  assert.equal((await seller.request('/home')).user.balance, 1000);
+  assert.equal((await seller.request('/home')).teams[0].balance, 1000);
+
+  const fixed = { team: 'all', description: 'Taxa de maquininha', type: 'fixed', value: 200, request: randomBytes(16).toString('hex') };
+  await seller.request('/bank/charges', fixed, 403);
+  assert.equal((await admin('/bank/charges', fixed, 201)).count, 2);
+  assert.equal((await admin('/bank/charges', fixed, 201)).count, 2);
+  const percentage = { team: team.id, description: 'IPTU', type: 'percent', value: 1250, request: randomBytes(16).toString('hex') };
+  await admin('/bank/charges', percentage, 201);
+  await credit(team.id, 500);
+  const mine = (await seller.request('/home')).teams[0].charges;
+  assert.equal(mine.length, 2);
+  const tax = mine.find(charge => charge.description === 'IPTU');
+  assert.equal(tax.amount, 125);
+  const pay = '/bank/charges/' + tax.id + '/pay';
+  await outsider.request(pay, {}, 403);
+  await second.request(pay, {}, 403);
+  await Promise.all([seller.request(pay, {}), seller.request(pay, {})]);
+  assert.equal((await seller.request('/home')).teams[0].balance, 1375);
+  assert.equal((await admin('/home')).user.balance, 125);
+  assert.equal((await seller.request('/activity/' + tax.id)).description, 'IPTU');
+  assert.equal((await seller.request('/activity/' + tax.id)).canRefund, false);
+  const otherCharge = (await second.request('/home')).teams[0].charges[0];
+  assert.equal(otherCharge.team, other.id);
+  await admin('/bank/charges/' + otherCharge.id + '/cancel', {});
+  await second.request('/bank/charges/' + otherCharge.id + '/pay', {}, 409);
+});
+
 test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conversão em Pix', async t => {
   const broker = Aedes();
   const listener = createServer(broker.handle).listen(0, '127.0.0.1');
@@ -327,4 +412,8 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await buyer.request('/pix/' + fallback.id, {});
   assert.equal((await buyer.request('/home')).user.balance, 1500);
   assert.equal((await seller.request('/home')).teams[0].balance, 6000);
+  assert.equal((await seller.request('/activity/' + sale.id)).canRefund, true);
+  await seller.request('/activity/' + sale.id + '/refund', {});
+  assert.equal((await buyer.request('/home')).user.balance, 3500);
+  assert.equal((await seller.request('/home')).teams[0].balance, 4000);
 });

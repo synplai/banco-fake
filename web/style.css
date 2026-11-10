@@ -126,7 +126,10 @@ input::placeholder { color: #817894; }
 .empty strong { margin-top: 3px; font-size: 14px; }
 .empty p { font-size: 12px; }
 .activity { margin: 0; padding: 0; list-style: none; }
-.activity li, .record { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 12px 21px; border-top: 1px solid var(--line); font-size: 14px; }
+.activity-row, .record { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 12px 21px; border-top: 1px solid var(--line); font-size: 14px; }
+.activity-row { grid-template-columns: auto minmax(0,1fr) auto auto; width: 100%; border-inline: 0; border-bottom: 0; background: none; color: inherit; text-align: left; }
+.activity-row:hover { background: #f8f5fd; }
+.activity-row > .icon { width: 14px; color: var(--muted); }
 .activity strong, .record strong { display: block; overflow-wrap: anywhere; }
 .activity small, .record small { display: block; color: var(--muted); font-size: 11px; }
 .positive { color: #367044; }
@@ -148,6 +151,23 @@ input::placeholder { color: #817894; }
 .pix-details { flex: 1 1 220px; min-width: 0; }
 .pix-details .pix-code-label { margin-bottom: 5px; font-weight: 700; }
 .pix-code { display: block; overflow-wrap: anywhere; user-select: all; margin-bottom: 10px; padding: 10px 12px; background: #f7f4fc; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+.recipient-preview { display: grid; gap: 4px; padding: 10px 12px; background: #f7f4fc; color: #452f70; border-radius: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.recipient-preview:empty, .payment-feedback:empty, [data-credit-summary]:empty, [data-key-help]:empty { display: none; }
+.key-list { list-style: none; padding: 0; margin: 0 0 15px; display: grid; gap: 8px; }
+.key-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; border: 1px solid var(--line); padding: 10px; border-radius: 12px; }
+.key-list strong, .key-list code { display: block; font-size: 13px; overflow-wrap: anywhere; }
+.key-list code { margin-top: 4px; color: var(--muted); }
+.key-actions, .result-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.key-actions .btn { min-height: 35px; padding: 6px 9px; font-size: 12px; }
+.receipt-details { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,2fr); gap: 12px; font-size: 13px; }
+.receipt-details dt { color: var(--muted); }
+.receipt-details dd { margin: 0; font-weight: 650; overflow-wrap: anywhere; }
+.receipt-details small { display: block; margin-top: 3px; color: var(--muted); font-weight: 400; }
+.payment-result { display: grid; justify-items: center; text-align: center; gap: 8px; border-radius: 16px; padding: 18px 12px; }
+.payment-result.success { background: #e9f6e6; color: #245d37; margin-bottom: 14px; }
+.payment-result.failure { background: #fcecf0; color: #852441; }
+.payment-result > .icon { width: 46px; height: 46px; padding: 11px; border: 2px solid currentColor; border-radius: 50%; }
+.payment-result p { font-size: 13px; }
 .qr { border-radius: 15px; width: min(100%,220px); height: auto; border: 1px solid var(--line); }
 .confirmation { display: flex; align-items: center; gap: 10px; padding: 15px 20px; border-radius: 14px; background: #e6f9e9; color: #275a39; font-weight: 700; }
 .confirmation strong { margin-left: auto; }
@@ -223,7 +243,7 @@ dialog::backdrop { background: #1c1135a8; }
   .metrics,.student-grid { gap: 8px; }
   .metric { padding: 12px; }
   .student-grid { grid-template-columns: 1fr; }
-  .activity li,.record { padding: 10px 12px; gap: 7px; }
+  .activity-row,.record { padding: 10px 12px; gap: 7px; }
   .record-actions { flex-wrap: wrap; justify-content: end; max-width: 128px; }
   .panel-head { padding: 14px 12px; }
   .panel-actions { padding-inline: 12px; }
@@ -232,4 +252,6 @@ dialog::backdrop { background: #1c1135a8; }
 }
 @media (prefers-reduced-motion: no-preference) {
   button { transition: background-color .15s, color .15s; }
+  .payment-result > .icon { animation: payment-pop .38s cubic-bezier(.2,.8,.25,1.3) both; }
 }
+@keyframes payment-pop { from { opacity: .2; transform: scale(.55); } to { opacity: 1; transform: scale(1); } }

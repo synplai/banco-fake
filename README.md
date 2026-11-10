@@ -61,11 +61,23 @@ O broker informado já consta nos exemplos: `tokaido.proxy.rlwy.net:17906`. A co
 
 ## Pix simulado
 
-Em **Minha conta**, **Meu estabelecimento** ou **Conta do gestor**, use **Enviar Pix** para transferir por nome de usuário ou pelo CNPJ fictício do estabelecimento. Revise a conta de origem, o destinatário e o valor antes de confirmar. O pagamento sai do saldo da conta aberta. Os alunos e estabelecimentos veem a operação no extrato, e o gestor acompanha pelo painel de movimentações.
+Em **Minha conta**, **Meu estabelecimento** ou **Conta do banco**, abra **Minhas chaves Pix** para ver e copiar as chaves da conta ou cadastrar uma nova. O simulador aceita chave aleatória, e-mail e celular fictícios, além de CPF fictício nas contas pessoais. O usuário ou o CNPJ cadastrado também funciona como chave.
+
+Em **Enviar Pix**, cole a chave no campo único. O sistema reconhece a chave e mostra o destinatário antes da revisão. Se houver ambiguidade, use `@` antes do usuário, `+55` no celular ou a pontuação do documento. O pagamento sai do saldo da conta aberta.
+
+Toque em uma movimentação no extrato para abrir o comprovante com valor, data, status, origem, destino e identificador. Quem recebeu pode devolver o Pix, e o estabelecimento pode estornar vendas por cartão. A devolução é integral, exige saldo e aparece como um novo registro associado ao original.
 
 Para cobrar uma venda, o vendedor pode tocar **Gerar Pix** no teclado ou converter uma cobrança em aberto. A tela mostra o QR Code e o código completo para copiar. O comprador abre **Pagar cobrança** na conta que deseja usar e escaneia o QR Code, carrega uma foto ou cola o código. O código é exclusivo do Banco Virtual.
 
 No celular, o navegador exige HTTPS e permissão de câmera para leitura ao vivo. O localhost é suficiente para testes no próprio computador. [Requisitos de câmera no navegador](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)
+
+## Cobranças do banco
+
+No painel do gestor, abra **Cobranças → Nova cobrança**. Informe a descrição (por exemplo, taxa da maquininha, IPTU fictício ou aluguel) e escolha um estabelecimento ou todos. O valor pode ser fixo ou um percentual do saldo disponível no momento do lançamento. Se o percentual resultar em R$ 0,00 para uma conta, ela não recebe a cobrança.
+
+Em **Meu estabelecimento → Cobranças do banco**, os alunos autorizados veem o que está pendente e podem pagar. O saldo do estabelecimento só é debitado na confirmação. O valor é creditado na **Conta do banco**, cujo saldo aparece na visão geral do gestor. O pagamento gera comprovante no extrato.
+
+Em **Liberar saldo**, **Todas as contas** credita o mesmo valor por conta ativa de aluno ou estabelecimento.
 
 ## Publicação no Railway
 
