@@ -179,9 +179,9 @@ export async function transfer(db, { id = uid(), payer = null, payee, amount, me
   await run(db, 'UPDATE accounts SET balance=balance+? WHERE id=?', amount, payee);
   await run(db, 'INSERT INTO ledger VALUES (?,?,?,?,?,?,?,?)', id, payer, payee, amount, method, Date.now(), actor, request);
 }
-export async function settle(db, op, payer, method) {
+export async function settle(db, op, payer, method, actor = payer) {
   requireRule(op.status === 'pending' && op.method === method, 'Esta cobrança não está disponível.', 409);
-  await transfer(db, { id: op.id, payer, payee: op.owner, amount: op.amount, method, actor: payer });
+  await transfer(db, { id: op.id, payer, payee: op.owner, amount: op.amount, method, actor });
   await run(db, "UPDATE operations SET status='paid',detail=NULL WHERE id=?", op.id);
 }
 export function activity(db, account) {

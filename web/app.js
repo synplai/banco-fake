@@ -157,7 +157,10 @@ function adminPage() {
       '<div class="metrics">' + metrics('Alunos', students.length, students.filter(x => x.hasCard).length + ' com cartão RFID', 'users', 'purple') +
       metrics('Estabelecimentos', teams.length, 'CNPJs fictícios cadastrados', 'shop', 'lime') +
       metrics('Maquininhas', devices.length, devices.filter(x => x.online).length + ' online agora', 'device', 'peach') +
-      metrics('Saldo em circulação', money(accounts.reduce((sum, x) => sum + x.balance, 0)), 'Total nas contas ativas', 'card', 'blue') + '</div>' +
+      metrics('Saldo em circulação', money(accounts.reduce((sum, x) => sum + x.balance, state.data.user.balance)), 'Total nas contas ativas', 'card', 'blue') + '</div>' +
+      section('Conta do gestor', 'Saldo disponível · ' + money(state.data.user.balance),
+        '<div class="panel-actions pix-actions">' + button('Enviar Pix', 'pix-send', 'up', 'ghost') +
+        button('Pagar cobrança', 'pix', 'pix', 'ghost') + '</div>') +
       section('Movimentações recentes', 'Créditos e pagamentos de todas as contas', activity(rows), pill('Simulação', 'neutral'));
   }
   if (state.page === 'students') return intro('CADASTROS', 'Alunos', 'Veja quem já vinculou o cartão e gerencie as contas.', button('Cadastrar aluno', 'student', 'plus')) +
@@ -193,7 +196,8 @@ function studentPage() {
     (state.balance ? money(user.balance) : 'R$ ••••') + '<button class="icon-btn" data-action="balance" aria-label="' +
     (state.balance ? 'Ocultar saldo' : 'Mostrar saldo') + '">' + icon('eye') + '</button></div><p>Reais fictícios · Conta pessoal</p></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div></div>' +
     '<section class="panel quick"><h2>O que vamos fazer?</h2><div class="quick-grid">' +
-    '<button data-action="pix"><span class="tile-icon lime">' + icon('pix') + '</span><strong>Pagar com Pix</strong><small>Ler QR Code</small></button>' +
+    '<button data-action="pix-send"><span class="tile-icon lime">' + icon('up') + '</span><strong>Enviar Pix</strong><small>Por usuário ou CNPJ</small></button>' +
+    '<button data-action="pix"><span class="tile-icon lime">' + icon('pix') + '</span><strong>Pagar cobrança</strong><small>QR Code ou código Pix</small></button>' +
     '<button data-action="card"><span class="tile-icon purple">' + icon('card') + '</span><strong>Vincular cartão</strong><small>Pagamento RFID</small></button></div></section></div>' +
     section('Meu cartão', cardMessage, isPending ? '<div class="panel-actions">' + button('Cancelar vínculo', 'card-cancel', null, 'ghost', card.id) + '</div>' : '',
       pill(isPending ? 'Aguardando' : user.hasCard ? 'Vinculado' : 'Sem cartão', user.hasCard && !isPending ? 'good' : 'neutral')) +
@@ -203,20 +207,24 @@ function teamPage(team) {
   const sale = team.sale;
   const active = sale?.status === 'pending';
   const qr = '/api/teams/' + team.id + '/sales/' + sale?.id + '/qr';
+  const code = 'BANCOVIRTUAL:' + sale?.id;
   return intro('CONTA DO ESTABELECIMENTO', team.name, 'CNPJ fictício ' + team.cnpj, active ? '' : button('Efetuar venda', 'sale', 'plus', 'primary', team.id)) +
     '<div class="student-grid"><div class="hero balance-hero"><div><span class="eyebrow"><i></i> SALDO DO ESTABELECIMENTO</span><div class="balance-value">' +
-    money(team.balance) + '</div><p>Reais fictícios · Conta comercial</p></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div></div>' +
+    money(team.balance) + '</div><p>Reais fictícios · Conta comercial</p><div class="pix-actions">' +
+    button('Enviar Pix', 'pix-send', 'up', 'ghost', team.id) + button('Pagar cobrança', 'pix', 'pix', 'ghost', team.id) +
+    '</div></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div></div>' +
     section('Maquininha', team.device?.name || 'Vincule o leitor RFID do estabelecimento.', team.device ? '' : '<div class="panel-actions">' +
     button('Vincular maquininha', 'pair', 'device', 'ghost', team.id) + '</div>', team.device ? pill(team.device.online ? 'Online' : 'Offline', team.device.online ? 'good' : 'neutral') : '') + '</div>' +
     (active ? section('Cobrança em aberto', 'Aguardando pagamento · ' + money(sale.amount), '<div class="sale-status">' +
-      (sale.method === 'pix' ? '<img class="qr" width="220" height="220" src="' + qr + '" alt="QR Code do Pix fictício"><div><h3>Pix simulado</h3><p>Peça ao cliente para abrir Pagar com Pix no banco.</p>' +
-        button('Copiar código', 'copy', null, 'ghost', 'BANCOVIRTUAL:' + sale.id) + '</div>' :
+      (sale.method === 'pix' ? '<img class="qr" width="220" height="220" src="' + qr + '" alt="QR Code do Pix fictício"><div class="pix-details"><h3>Pix simulado</h3><p>Peça ao cliente para abrir Pagar cobrança no banco.</p>' +
+        '<p class="pix-code-label">Código Pix copia e cola</p><code class="pix-code">' + esc(code) + '</code>' +
+        button('Copiar código', 'copy', null, 'ghost', code) + '</div>' :
         '<span class="tile-icon purple">' + icon('wifi') + '</span><div><h3>Aproxime o cartão</h3><p>' + esc(sale.detail || 'A maquininha está aguardando o cartão do cliente.') + '</p>' +
         button('Gerar QR Code Pix', 'sale-pix', 'pix', 'primary', sale.id) + '</div>') +
         '</div><div class="panel-actions">' + button('Cancelar cobrança', 'sale-cancel', null, 'ghost', sale.id) + '</div>', pill(sale.method === 'pix' ? 'Pix' : 'Cartão RFID', 'neutral')) :
       sale?.status === 'paid' ? '<div class="confirmation">' + icon('check') + '<span>Pagamento recebido</span><strong>' + money(sale.amount) + '</strong></div>' :
       sale?.status === 'expired' ? '<div class="confirmation neutral">A última cobrança expirou. Você já pode criar outra.</div>' : '') +
-    section('Extrato do estabelecimento', 'Créditos do gestor e vendas recebidas', activity(team.activity, team.id));
+    section('Extrato do estabelecimento', 'Créditos, vendas e pagamentos', activity(team.activity, team.id));
 }
 
 function showDialog(title, description, content) {
@@ -298,18 +306,51 @@ function pixId(value) {
   if (!match) throw new Error('Use um código Pix do Banco Virtual.');
   return match[1].toLowerCase();
 }
-async function previewPix(value) {
+function pixAccount(id) {
+  const account = id ? state.data.teams.find(team => team.id === id) : state.data.user;
+  if (!account) throw new Error('A conta de origem não está disponível.');
+  return account;
+}
+function pixOriginLabel(account) {
+  const label = account.cnpj ? 'Estabelecimento' : account.role === 'admin' ? 'Conta do gestor' : 'Conta pessoal';
+  return label + ' · ' + account.name;
+}
+function confirmPix(account, name, amount, path, payload) {
+  showDialog('Confirmar Pix', 'Confira a origem, o destinatário e o valor.', form(
+    '<div class="key-value"><span>PARA ' + esc(name) + '</span><strong>' + money(amount) + '</strong></div>' +
+    '<p class="field-help">Sai de ' + esc(pixOriginLabel(account)) + '</p>', 'Confirmar Pix'));
+  onForm(() => complete(path, { ...payload, source: account.id }, 'Pix pago com sucesso.'));
+}
+function sendPixDialog(account) {
+  const types = [{ id: 'username', name: 'Usuário da conta' }, { id: 'cnpj', name: 'CNPJ do estabelecimento' }];
+  showDialog('Enviar Pix', 'Sai de ' + pixOriginLabel(account), form(
+    select('Tipo de destinatário', 'type', types, 'username') +
+    input('Usuário ou CNPJ', 'key', 'placeholder="Ex. aluno1 ou 00.000.000/0001-00" maxlength="40" autocomplete="off"') +
+    input('Valor em reais', 'value', 'inputmode="decimal" placeholder="25,00"'), 'Revisar Pix'));
+  onForm(async (data, target) => {
+    const amount = cents(data.value);
+    if (amount <= 0) throw new Error('Informe um valor maior que zero.');
+    const key = data.key.trim().replace(/^@/, '');
+    if (!key) throw new Error('Informe o usuário ou CNPJ do destinatário.');
+    const recipient = await api('/pix/recipient/' + data.type + '/' + encodeURIComponent(key));
+    if (recipient.id === account.id) throw new Error('Escolha uma conta diferente da conta de origem.');
+    if (!modal.open || !target.isConnected) return;
+    const name = recipient.name + (recipient.username ? ' · @' + recipient.username : ' · CNPJ ' + recipient.cnpj);
+    confirmPix(account, name, amount, '/pix/transfer', { recipient: recipient.id, amount, request: requestId() });
+  });
+}
+async function previewPix(value, account) {
   stopCamera();
+  const target = modal.querySelector('form');
   const id = pixId(value);
   const data = await api('/pix/' + id);
-  showDialog('Confirmar pagamento', 'Confira os dados da cobrança.', form('<div class="key-value"><span>PARA ' + esc(data.name) + '</span><strong>' + money(data.amount) + '</strong></div>', 'Confirmar Pix'));
-  onForm(() => complete('/pix/' + id, {}, 'Pix pago com sucesso.'));
+  if (modal.open && target?.isConnected) confirmPix(account, data.name, data.amount, '/pix/' + id, {});
 }
-function pixDialog() {
-  showDialog('Pagar com Pix', 'Escaneie o QR Code do estabelecimento ou cole o código da cobrança.', '<div class="scan-area"><video playsinline muted hidden></video>' +
-    button('Abrir câmera', 'camera', 'pix', 'ghost') + '<label class="file-label">Selecionar foto do QR Code<input type="file" accept="image/*" id="qr-file"></label></div>' +
+function pixDialog(account) {
+  showDialog('Pagar cobrança Pix', 'Sai de ' + pixOriginLabel(account), '<div class="scan-area"><video playsinline muted hidden></video>' +
+    button('Abrir câmera', 'camera', 'pix', 'ghost', account.cnpj ? account.id : '') + '<label class="file-label">Selecionar foto do QR Code<input type="file" accept="image/*" id="qr-file"></label></div>' +
     form(input('Código Pix', 'code', 'placeholder="BANCOVIRTUAL:…" autocomplete="off"'), 'Consultar cobrança'));
-  onForm(data => previewPix(data.code));
+  onForm(data => previewPix(data.code, account));
   modal.querySelector('#qr-file').addEventListener('change', async e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -326,12 +367,13 @@ function pixDialog() {
       const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const found = window.jsQR(pixels.data, pixels.width, pixels.height);
       if (!found) throw new Error('Não foi possível ler o QR Code da foto.');
-      await previewPix(found.data);
+      if (modal.open && e.target.isConnected) await previewPix(found.data, account);
     } catch (e) { errorBox.textContent = e.message; }
     finally { bitmap?.close(); }
   });
 }
 async function startCamera(b) {
+  const account = pixAccount(b.dataset.id);
   const video = modal.querySelector('video');
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('A câmera precisa de HTTPS no celular. Você também pode usar uma foto ou colar o código.');
   b.disabled = true;
@@ -354,7 +396,7 @@ async function startCamera(b) {
         const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const found = window.jsQR(frame.data, frame.width, frame.height);
         if (found) {
-          previewPix(found.data).catch(e => { video.hidden = true; b.disabled = false; notice(e.message, true); });
+          previewPix(found.data, account).catch(e => { video.hidden = true; b.disabled = false; notice(e.message, true); });
           return;
         }
       }
@@ -495,7 +537,8 @@ document.addEventListener('click', async e => {
         break;
       }
       case 'card-cancel': await complete('/card/' + id + '/cancel', {}, 'Vínculo cancelado.'); break;
-      case 'pix': pixDialog(); break;
+      case 'pix-send': sendPixDialog(pixAccount(id)); break;
+      case 'pix': pixDialog(pixAccount(id)); break;
       case 'camera': await startCamera(b); break;
       case 'copy':
         if (navigator.clipboard) await navigator.clipboard.writeText(id);

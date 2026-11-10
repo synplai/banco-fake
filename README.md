@@ -61,7 +61,9 @@ O broker informado já consta nos exemplos: `tokaido.proxy.rlwy.net:17906`. A co
 
 ## Pix simulado
 
-O vendedor pode tocar **Gerar Pix** no teclado da venda ou converter uma cobrança em aberto. No próprio banco, o comprador abre **Pagar com Pix**, aponta a câmera para o QR Code e confere o destinatário e o valor antes de confirmar. Também é possível carregar uma foto do QR Code ou colar o código da cobrança. O código é exclusivo do Banco Virtual.
+Em **Minha conta**, **Meu estabelecimento** ou **Conta do gestor**, use **Enviar Pix** para transferir por nome de usuário ou pelo CNPJ fictício do estabelecimento. Revise a conta de origem, o destinatário e o valor antes de confirmar. O pagamento sai do saldo da conta aberta. Os alunos e estabelecimentos veem a operação no extrato, e o gestor acompanha pelo painel de movimentações.
+
+Para cobrar uma venda, o vendedor pode tocar **Gerar Pix** no teclado ou converter uma cobrança em aberto. A tela mostra o QR Code e o código completo para copiar. O comprador abre **Pagar cobrança** na conta que deseja usar e escaneia o QR Code, carrega uma foto ou cola o código. O código é exclusivo do Banco Virtual.
 
 No celular, o navegador exige HTTPS e permissão de câmera para leitura ao vivo. O localhost é suficiente para testes no próprio computador. [Requisitos de câmera no navegador](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)
 

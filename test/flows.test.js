@@ -216,6 +216,54 @@ test('Pix independente de MQTT, QR Code, autorização, SSE e pagamento idempote
   await secondBuyer.request('/pix/' + sale.id, {}, 409);
 });
 
+test('Pix direto e por cobrança entre contas pessoais e estabelecimentos', async t => {
+  const { admin, students, team, credit } = await setup({}, t, 1);
+  const [first, second, outsider] = students;
+  await admin('/admin/teams', {
+    name: 'Segundo estabelecimento', cnpj: '00.000.000/0001-91', members: [second.id]
+  }, 201);
+  const otherTeam = (await second.request('/home')).teams[0];
+  const recipient = await first.request('/pix/recipient/username/ALUNO2');
+  assert.equal(recipient.id, second.id);
+  assert.equal((await second.request('/pix/recipient/cnpj/' + encodeURIComponent('00.000.000/0001-90'))).id, team.id);
+  const manager = await outsider.request('/pix/recipient/username/gestor');
+  assert.equal(manager.role, 'admin');
+  await credit(first.id, 1000);
+  await credit(team.id, 2000);
+
+  const send = (actor, source, recipient, amount, status = 200) =>
+    actor.request('/pix/transfer', { source, recipient, amount, request: randomBytes(16).toString('hex') }, status);
+  await send(second, team.id, second.id, 100, 403);
+  await send(second, second.id, first.id, 100, 409);
+  await send(first, first.id, first.id, 100, 400);
+  const firstPix = { source: first.id, recipient: second.id, amount: 100, request: randomBytes(16).toString('hex') };
+  await Promise.all([first.request('/pix/transfer', firstPix), first.request('/pix/transfer', firstPix)]);
+  await first.request('/pix/transfer', { ...firstPix, amount: 101 }, 409);
+  await send(first, first.id, team.id, 200);
+  await send(first, team.id, first.id, 300);
+  await send(first, team.id, otherTeam.id, 400);
+  await send(second, otherTeam.id, second.id, 150);
+
+  const sale = await first.request('/teams/' + team.id + '/sales', { amount: 100, method: 'pix' }, 201);
+  await first.request('/pix/' + sale.id, { source: team.id }, 400);
+  await outsider.request('/pix/' + sale.id, { source: otherTeam.id }, 403);
+  await second.request('/pix/' + sale.id, { source: otherTeam.id });
+  await second.request('/pix/' + sale.id, { source: otherTeam.id });
+  const firstHome = await first.request('/home');
+  const secondHome = await second.request('/home');
+  assert.equal(firstHome.user.balance, 1000);
+  assert.equal(firstHome.teams[0].balance, 1600);
+  assert.equal(secondHome.user.balance, 250);
+  assert.equal(secondHome.teams[0].balance, 150);
+  assert.ok(secondHome.teams[0].activity.some(row => row.id === sale.id && row.payer === otherTeam.id));
+  await send({ request: admin }, manager.id, first.id, 100, 409);
+  await send(first, first.id, manager.id, 100);
+  await send({ request: admin }, manager.id, otherTeam.id, 75);
+  const managerHome = await admin('/home');
+  assert.equal(managerHome.user.balance, 25);
+  assert.equal(managerHome.activity.filter(row => row.method === 'pix').length, 8);
+});
+
 test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conversão em Pix', async t => {
   const broker = Aedes();
   const listener = createServer(broker.handle).listen(0, '127.0.0.1');

@@ -361,8 +361,46 @@ export async function createApp(db, config = process.env) {
     res.type('png').send(await QRCode.toBuffer('BANCOVIRTUAL:' + op.id, { width: 264, margin: 3 }));
   });
 
+  async function pixPayer(db, req) {
+    const payer = req.body.source ?? req.user.id;
+    check(typeof payer === 'string', 'Conta de origem inválida.');
+    if (payer !== req.user.id) await teamAccess(db, req, payer);
+    return payer;
+  }
+  api.get('/pix/recipient/:type/:key', async (req, res) => {
+    const { type, key } = req.params;
+    check(type === 'username' || type === 'cnpj', 'Tipo de chave inválido.');
+    const username = key.trim().toLowerCase();
+    const cnpj = key.toUpperCase().replace(/[./\s-]/g, '');
+    check(type === 'username' ? login.test(username) : /^[A-Z0-9]{12}\d{2}$/.test(cnpj), 'Informe um usuário ou CNPJ válido.');
+    const recipient = type === 'username'
+      ? await get(db, "SELECT id,name,role,username FROM accounts WHERE username=? AND role IN ('student','admin') AND deleted_at IS NULL", username)
+      : await get(db, "SELECT id,name,role,cnpj FROM accounts WHERE cnpj=? AND role='team' AND deleted_at IS NULL", cnpj);
+    check(recipient, 'Conta de destino não encontrada.', 404);
+    res.json(recipient);
+  });
+  api.post('/pix/transfer', async (req, res) => {
+    const { recipient, request } = req.body;
+    const cents = amount(req.body.amount);
+    check(typeof recipient === 'string', 'Selecione uma conta de destino.');
+    check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
+    const key = 'pix:' + req.user.id + ':' + request;
+    await transaction(db, async db => {
+      const payer = await pixPayer(db, req);
+      check(payer !== recipient, 'Escolha uma conta diferente da conta de origem.');
+      const previous = await get(db, 'SELECT payer,payee,amount FROM ledger WHERE request=?', key);
+      if (previous) {
+        check(previous.payer === payer && previous.payee === recipient && previous.amount === cents,
+          'Este Pix já foi confirmado com outros dados.', 409);
+        return;
+      }
+      check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND deleted_at IS NULL', recipient),
+        'Conta de destino não encontrada.', 404);
+      await transfer(db, { payer, payee: recipient, amount: cents, method: 'pix', actor: req.user.id, request: key });
+    });
+    res.json({ ok: true });
+  });
   async function pix(db, req) {
-    student(req);
     const op = await operation(db, req.params.id);
     check(op?.kind === 'sale' && op.method === 'pix', 'Cobrança Pix não encontrada.', 404);
     return op;
@@ -375,11 +413,13 @@ export async function createApp(db, config = process.env) {
   });
   api.post('/pix/:id', async (req, res) => {
     await transaction(db, async db => {
+      const payer = await pixPayer(db, req);
       await expire(db);
       const op = await pix(db, req);
+      check(payer !== op.owner, 'Escolha uma conta diferente da conta de destino.');
       const previous = await get(db, 'SELECT payer FROM ledger WHERE id=?', op.id);
-      if (previous?.payer === req.user.id) return;
-      await settle(db, op, req.user.id, 'pix');
+      if (previous?.payer === payer) return;
+      await settle(db, op, payer, 'pix', req.user.id);
     });
     res.json({ ok: true });
   });

@@ -143,6 +143,11 @@ input::placeholder { color: #817894; }
 .quick-grid small { font-size: 11px; color: var(--muted); }
 .sale-status { display: flex; align-items: center; gap: 15px; padding: 4px 21px 16px; }
 .sale-status p { margin: 5px 0 10px; }
+.pix-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.panel-actions.pix-actions { margin-top: 0; }
+.pix-details { flex: 1 1 220px; min-width: 0; }
+.pix-details .pix-code-label { margin-bottom: 5px; font-weight: 700; }
+.pix-code { display: block; overflow-wrap: anywhere; user-select: all; margin-bottom: 10px; padding: 10px 12px; background: #f7f4fc; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
 .qr { border-radius: 15px; width: min(100%,220px); height: auto; border: 1px solid var(--line); }
 .confirmation { display: flex; align-items: center; gap: 10px; padding: 15px 20px; border-radius: 14px; background: #e6f9e9; color: #275a39; font-weight: 700; }
 .confirmation strong { margin-left: auto; }
