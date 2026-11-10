@@ -13,6 +13,7 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <esp_system.h>
+#include <mbedtls/ecdh.h>
 #include <mbedtls/md.h>
 #include <time.h>
 #include <sys/time.h>
@@ -65,6 +66,7 @@ DeviceSettings settings{};
 char activeDeviceId[37]{};
 char activeDeviceKey[65]{};
 String eventTopic, armTopic, statusTopic, operation, mqttClientId, pendingHelloNonce;
+String devicePublicKey, discoveryKey;
 std::atomic<bool> mqttConnected{false};
 std::atomic<bool> bankConfirmed{false};
 std::atomic<uint32_t> lastBankConfirmation{0};
@@ -230,7 +232,7 @@ summary{cursor:pointer}small{display:block;color:#534765}.notice{padding:10px;ba
   page += String("<section><h2>Conexão</h2><p>Wi-Fi: ") + (wifiOnline ? "conectado" : "aguardando conexão") +
     "</p><p>MQTT: " + (mqttConnected ? "conectado" : "desconectado") +
     "</p><p>Banco: " + (bankOnline ? "comunicação confirmada" : "aguardando confirmação") +
-    "</p><small>Se o MQTT conectar e o banco não confirmar, confira o ID e a chave cadastrados no site e o prefixo MQTT no Railway.</small></section>";
+    "</p><small>Ao conectar, a maquininha livre aparece na lista de vinculação do banco.</small></section>";
   if (message.length()) page += String("<p class='notice'>") + escapeHtml(message) + "</p>";
   const String token = String("<input type='hidden' name='token' value='") + portalToken + "'>";
   page += "<section><h2>Wi-Fi de operação</h2><form method='post' action='/wifi'>" + token +
@@ -241,8 +243,7 @@ summary{cursor:pointer}small{display:block;color:#534765}.notice{padding:10px;ba
   page += "<section><details><summary>Cadastro da maquininha</summary>";
   if (hasIdentity()) {
     page += String("<label>ID de cadastro<input readonly value='") + settings.id +
-      "'></label><label>Chave da maquininha<input readonly value='" + settings.key +
-      "'></label><small>Copie o ID e a chave para o painel do gestor. Mantenha a chave em segredo.</small>";
+      "'></label><small>Selecione este ID na lista de maquininhas disponíveis ou digite os quatro dígitos no banco.</small>";
     page += "<details><summary>Trocar a identidade</summary><p>Use se o ID ainda não foi cadastrado ou está em uso por outro aparelho.</p>";
   } else {
     page += "<p>O ID e a chave serão gerados ao salvar o Wi-Fi, ou você pode gerar agora.</p>";
@@ -502,20 +503,70 @@ void startPortal() {
   printPortalAccess();
 }
 
-String sign(const String &message) {
+String hmacHex(const byte *key, size_t length, const String &message) {
   byte digest[32];
   mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                  reinterpret_cast<const unsigned char *>(activeDeviceKey), strlen(activeDeviceKey),
+                  key, length,
                   reinterpret_cast<const unsigned char *>(message.c_str()), message.length(), digest);
   return hex(digest, sizeof(digest), "0123456789abcdef");
+}
+
+String sign(const String &message) {
+  const char *key = discoveryKey.isEmpty() ? activeDeviceKey : discoveryKey.c_str();
+  return hmacHex(reinterpret_cast<const byte *>(key), strlen(key), message);
+}
+
+int exchangeRandom(void *, unsigned char *output, size_t length) {
+  esp_fill_random(output, length);
+  return 0;
+}
+
+String exchangeIdentity(const String &serverPublicKey) {
+  mbedtls_ecp_group group;
+  mbedtls_ecp_point point;
+  mbedtls_mpi privateKey, shared;
+  mbedtls_ecp_group_init(&group);
+  mbedtls_ecp_point_init(&point);
+  mbedtls_mpi_init(&privateKey);
+  mbedtls_mpi_init(&shared);
+  byte buffer[65];
+  size_t length = 0;
+  String result;
+  const bool initialized = mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1) == 0 &&
+                           mbedtls_mpi_read_string(&privateKey, 16, activeDeviceKey) == 0;
+  if (initialized && serverPublicKey.isEmpty()) {
+    if (mbedtls_ecp_mul(&group, &point, &privateKey, &group.G, exchangeRandom, nullptr) == 0 &&
+        mbedtls_ecp_point_write_binary(&group, &point, MBEDTLS_ECP_PF_UNCOMPRESSED, &length, buffer, sizeof(buffer)) == 0) {
+      result = hex(buffer, length, "0123456789abcdef");
+    }
+  } else if (initialized && serverPublicKey.length() == sizeof(buffer) * 2 && allHex(serverPublicKey)) {
+    for (size_t i = 0; i < sizeof(buffer); i++) {
+      char pair[]{serverPublicKey[i * 2], serverPublicKey[i * 2 + 1], 0};
+      buffer[i] = strtoul(pair, nullptr, 16);
+    }
+    if (mbedtls_ecp_point_read_binary(&group, &point, buffer, sizeof(buffer)) == 0 &&
+        mbedtls_ecp_check_pubkey(&group, &point) == 0 &&
+        mbedtls_ecdh_compute_shared(&group, &shared, &point, &privateKey, exchangeRandom, nullptr) == 0 &&
+        mbedtls_mpi_write_binary(&shared, buffer, 32) == 0) {
+      result = hmacHex(buffer, 32, String("device|") + MQTT_PREFIX + "|" + activeDeviceId);
+    }
+  }
+  mbedtls_mpi_free(&shared);
+  mbedtls_mpi_free(&privateKey);
+  mbedtls_ecp_point_free(&point);
+  mbedtls_ecp_group_free(&group);
+  return result;
 }
 
 bool publishEvent(const char *type, const String &op, const String &card) {
   byte random[16];
   esp_fill_random(random, sizeof(random));
   const String nonce = hex(random, sizeof(random), "0123456789abcdef");
-  if (strcmp(type, "hello") == 0) pendingHelloNonce = nonce;
   JsonDocument event;
+  if (strcmp(type, "hello") == 0) {
+    pendingHelloNonce = nonce;
+    if (!devicePublicKey.isEmpty()) event["pub"] = devicePublicKey;
+  }
   event["type"] = type;
   event["nonce"] = nonce;
   event["op"] = op;
@@ -532,9 +583,20 @@ void onMessage(char *topic, byte *payload, unsigned int length) {
   if (deserializeJson(event, payload, length)) return;
   if (statusTopic == topic) {
     const String nonce = event["nonce"] | "";
+    if (pendingHelloNonce.isEmpty() || nonce != pendingHelloNonce) return;
+    const String offeredPublicKey = event["pub"] | "";
+    const bool recentlyConfirmed = bankConfirmed && millis() - lastBankConfirmation < 25000;
+    if (!devicePublicKey.isEmpty() && !recentlyConfirmed && !offeredPublicKey.isEmpty()) {
+      const String key = exchangeIdentity(offeredPublicKey);
+      if (!key.isEmpty() && key != discoveryKey) {
+        discoveryKey = key;
+        lastHello = millis() - 8000;
+      }
+      return;
+    }
     const String timestamp = event["time"] | "";
     const String proof = event["sig"] | "";
-    if (pendingHelloNonce.isEmpty() || nonce != pendingHelloNonce || timestamp.length() != 10 ||
+    if (timestamp.length() != 10 ||
         proof != sign(String("status|") + activeDeviceId + "|" + nonce + "|" + timestamp)) return;
     const time_t serverTime = strtoll(timestamp.c_str(), nullptr, 10);
     if (serverTime < 1700000000) return;
@@ -584,6 +646,7 @@ void setup() {
   WiFi.setAutoReconnect(false);
   lastWifiAttempt = millis();
   WiFi.begin(savedAtBoot.ssid, savedAtBoot.password);
+  if (strlen(activeDeviceId) == 4) devicePublicKey = exchangeIdentity("");
   configTime(0, 0, "pool.ntp.org", "time.google.com");
 #if MQTT_TLS
   transport.setCACert(MQTT_CA);

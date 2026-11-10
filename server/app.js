@@ -5,7 +5,7 @@ import {
   activity, all, deadline, expire, get, hash, initAdmin, moneyLimit, passwordHash,
   requireRule as check, Rule, run, secret, settle, transaction, transfer, uid, verifyPassword
 } from './db.js';
-import { bridge } from './mqtt.js';
+import { bridge, deviceOnlineSince } from './mqtt.js';
 import { keyCandidates, normalizeKey, registeredTypes } from './pix-keys.js';
 
 const web = fileURLToPath(new URL('../web/', import.meta.url));
@@ -14,8 +14,8 @@ const login = /^[a-z0-9._-]{3,40}$/;
 const normalize = value => typeof value === 'string' ? value.trim() : '';
 const userFields = 'id,name,role,username,cnpj,balance,CAST(card IS NOT NULL AS INTEGER) AS "hasCard"';
 const deviceFields = 'd.id,d.name,d.team,d.seen,a.name AS "teamName"';
-const lastMinute = () => Date.now() - 25000;
-const publicDevice = d => ({ ...d, online: d.seen >= lastMinute() });
+const publicDevice = d => ({ ...d, online: d.seen >= deviceOnlineSince() });
+const defaultDeviceName = id => 'Maquininha ' + id;
 
 function sessionToken(req) {
   return /(?:^|;\s*)feira=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
@@ -47,7 +47,7 @@ export async function createApp(db, config = process.env) {
     }
   };
   const tick = setInterval(changed, 10000).unref();
-  const mqtt = bridge(db, config, changed);
+  const mqtt = await bridge(db, config, changed);
   const app = express();
   const api = express.Router();
   const attempts = new Map();
@@ -141,6 +141,15 @@ export async function createApp(db, config = process.env) {
   }
   const devices = async (where = '', ...args) => (await all(db, 'SELECT ' + deviceFields +
     ' FROM devices d LEFT JOIN accounts a ON a.id=d.team ' + where + ' ORDER BY d.name', ...args)).map(publicDevice);
+  async function availableDevices() {
+    if (!mqtt.ready()) return [];
+    const since = deviceOnlineSince();
+    const registered = await devices('WHERE d.team IS NULL AND d.seen>=?', since);
+    const discovered = await all(db, `SELECT candidate.id FROM device_discovery candidate
+      WHERE candidate.seen>=? AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.id=candidate.id)
+      GROUP BY candidate.id HAVING COUNT(*)=1 ORDER BY candidate.id`, since);
+    return [...registered, ...discovered.map(({ id }) => ({ id, name: defaultDeviceName(id), online: true, discovered: true }))];
+  }
   const operation = (db, id) => get(db, 'SELECT * FROM operations WHERE id=?', id);
   const chargeFields = 'c.id,c.team,c.description,c.rate,c.amount,c.created,c.paid_at,c.cancelled_at,a.name AS "teamName"';
 
@@ -150,7 +159,7 @@ export async function createApp(db, config = process.env) {
     if (user.role === 'admin') {
       const accounts = await all(db, "SELECT " + userFields + " FROM accounts WHERE role<>'admin' AND deleted_at IS NULL ORDER BY name");
       const members = await all(db, 'SELECT team,student FROM members');
-      return res.json({ user, accounts, members, devices: await devices(), mqtt: mqtt.ready(),
+      return res.json({ user, accounts, members, devices: await devices(), availableDevices: await availableDevices(), mqtt: mqtt.ready(),
         charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
         activity: await all(db,
         'SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName" FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
@@ -162,7 +171,7 @@ export async function createApp(db, config = process.env) {
       team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
       team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL ORDER BY c.created DESC', team.id);
     }
-    res.json({ user, teams, activity: await activity(db, user.id), devices: await devices(),
+    res.json({ user, teams, activity: await activity(db, user.id), devices: await devices(), availableDevices: teams.length ? await availableDevices() : [],
       card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
   });
 
@@ -346,6 +355,15 @@ export async function createApp(db, config = process.env) {
   });
   api.post('/admin/devices', async (req, res) => {
     manager(req);
+    if (typeof req.body.deviceId === 'string' && req.body.deviceKey === undefined && req.body.name === undefined) {
+      const id = normalize(req.body.deviceId);
+      check(/^\d{4}$/.test(id), 'Informe os quatro dígitos da maquininha.');
+      await transaction(db, async db => {
+        check(!await get(db, 'SELECT 1 FROM devices WHERE id=?', id), 'Esta maquininha já está cadastrada.', 409);
+        await registerDiscoveredDevice(db, id);
+      });
+      return res.status(201).json({ id });
+    }
     const name = normalize(req.body.name);
     check(name.length >= 2 && name.length <= 50, 'Informe um nome para a maquininha.');
     const providedId = normalize(req.body.deviceId).toLowerCase();
@@ -361,6 +379,16 @@ export async function createApp(db, config = process.env) {
     });
     res.status(201).json({ id, key, pairing });
   });
+  async function registerDiscoveredDevice(db, id) {
+    check(/^\d{4}$/.test(id), 'Maquininha não encontrada.', 404);
+    const candidates = mqtt.ready() ? await all(db,
+      'SELECT key,seen FROM device_discovery WHERE id=? AND seen>=?', id, deviceOnlineSince()) : [];
+    check(candidates.length, 'Maquininha offline. Ligue-a e confira os quatro dígitos.', 404);
+    check(candidates.length === 1, 'Há duas maquininhas com esse ID. Gere outro ID no portal de uma delas.', 409);
+    const { key, seen } = candidates[0];
+    await run(db, 'INSERT INTO devices (id,name,key,seen) VALUES (?,?,?,?)', id, defaultDeviceName(id), key, seen);
+    await run(db, 'DELETE FROM device_discovery WHERE id=?', id);
+  }
   api.post('/admin/devices/:id/reset', async (req, res) => {
     manager(req);
     const pairing = secret().slice(0, 12).toUpperCase();
@@ -376,9 +404,9 @@ export async function createApp(db, config = process.env) {
     check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", team),
       'Estabelecimento não encontrado.', 404);
     const device = await get(db, 'SELECT team FROM devices WHERE id=?', id);
-    check(device, 'Maquininha não encontrada.', 404);
-    if (device.team === team) return;
-    check(!device.team, 'Esta maquininha já está vinculada a outro estabelecimento.', 409);
+    if (device?.team === team) return;
+    check(!device?.team, 'Esta maquininha já está vinculada a outro estabelecimento.', 409);
+    if (!device) await registerDiscoveredDevice(db, id);
     check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
     await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE id=?', team, id);
   }
@@ -431,7 +459,7 @@ export async function createApp(db, config = process.env) {
   async function reserve(db, deviceId) {
     check(mqtt.ready(), 'MQTT indisponível. Verifique a conexão da maquininha.');
     const device = await get(db, 'SELECT * FROM devices WHERE id=? AND team IS NOT NULL', deviceId);
-    check(device && device.seen >= lastMinute(), 'A maquininha está offline.');
+    check(device && device.seen >= deviceOnlineSince(), 'A maquininha está offline.');
     check(!await get(db, "SELECT 1 FROM operations WHERE device=? AND status='pending'", device.id), 'Maquininha ocupada.', 409);
     return device.id;
   }

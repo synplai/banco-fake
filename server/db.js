@@ -41,6 +41,12 @@ const schema = `
       id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL, pairing TEXT UNIQUE,
       team TEXT UNIQUE REFERENCES accounts(id), seen BIGINT NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS device_discovery (
+      id TEXT NOT NULL, key TEXT NOT NULL, seen BIGINT NOT NULL, PRIMARY KEY(id,key)
+    );
+    CREATE TABLE IF NOT EXISTS device_exchange (
+      id INTEGER PRIMARY KEY CHECK(id=1), key TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS operations (
       id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('sale','card')),
       owner TEXT NOT NULL REFERENCES accounts(id), device TEXT REFERENCES devices(id),

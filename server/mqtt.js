@@ -1,12 +1,24 @@
 import mqtt from 'mqtt';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createECDH, createHmac, timingSafeEqual } from 'node:crypto';
 import { expire, get, run, settle, transaction, Rule } from './db.js';
 
 export const signature = (key, ...fields) =>
   createHmac('sha256', key).update(fields.join('|')).digest('hex');
+export const deviceOnlineSince = () => Date.now() - 25000;
 
-export function bridge(db, config, changed) {
+export async function bridge(db, config, changed) {
   const topic = config.MQTT_PREFIX || 'bancofeira/v1';
+  const exchange = createECDH('prime256v1');
+  if (config.MQTT_URL) {
+    await transaction(db, async db => {
+      const saved = await get(db, 'SELECT key FROM device_exchange WHERE id=1');
+      if (saved) exchange.setPrivateKey(saved.key, 'hex');
+      else {
+        exchange.generateKeys();
+        await run(db, 'INSERT INTO device_exchange VALUES (1,?)', exchange.getPrivateKey('hex'));
+      }
+    });
+  }
   const client = config.MQTT_URL ? mqtt.connect(config.MQTT_URL, {
     username: config.MQTT_USER || undefined,
     password: config.MQTT_PASSWORD || undefined,
@@ -22,14 +34,30 @@ export function bridge(db, config, changed) {
   };
   async function receive(id, event, retained = false) {
     if (retained || !event || typeof event !== 'object') return;
-    const { type, nonce, op = '', card = '', sig } = event;
-    if (!/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) return;
+    const { type, nonce, op = '', card = '', sig, pub } = event;
+    if (typeof nonce !== 'string' || typeof sig !== 'string' || !/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) return;
     if (type === 'hello' ? (op !== '' || card !== '') :
       (type !== 'tap' || !/^[a-f0-9-]{36}$/.test(op) || !/^(?:[A-F0-9]{8}|[A-F0-9]{14}|[A-F0-9]{20})$/.test(card))) return;
+    const valid = key => timingSafeEqual(Buffer.from(sig, 'hex'),
+      Buffer.from(signature(key, type, id, nonce, op, card), 'hex'));
     const result = await transaction(db, async db => {
       const device = await get(db, 'SELECT * FROM devices WHERE id=?', id);
-      if (!device || !timingSafeEqual(Buffer.from(sig, 'hex'),
-        Buffer.from(signature(device.key, type, id, nonce, op, card), 'hex'))) return;
+      if (!device || !valid(device.key)) {
+        if (type !== 'hello' || !/^\d{4}$/.test(id) || typeof pub !== 'string' || !/^04[a-f0-9]{128}$/.test(pub)) return;
+        let key;
+        try {
+          key = signature(exchange.computeSecret(pub, 'hex'), 'device', topic, id);
+        } catch { return; }
+        if (device && device.key !== key) return;
+        if (!valid(key)) return { offer: exchange.getPublicKey('hex') };
+        if (device) return;
+        const since = deviceOnlineSince();
+        await run(db, 'DELETE FROM device_discovery WHERE seen<?', since);
+        const known = await get(db, 'SELECT 1 FROM device_discovery WHERE id=? AND key=?', id, key);
+        await run(db, `INSERT INTO device_discovery VALUES (?,?,?)
+          ON CONFLICT(id,key) DO UPDATE SET seen=excluded.seen`, id, key, Date.now());
+        return { candidate: { id, key }, discovered: !known };
+      }
       await expire(db);
       await run(db, 'UPDATE devices SET seen=? WHERE id=?', Date.now(), id);
       const current = await get(db, "SELECT * FROM operations WHERE device=? AND status='pending'", id);
@@ -56,7 +84,11 @@ export function bridge(db, config, changed) {
       return { device };
     });
     if (!result) return;
-    const { device, active } = result;
+    if (result.offer) {
+      if (ready) client.publish(topic + '/' + id + '/status', JSON.stringify({ nonce, pub: result.offer }), { qos: 1 });
+      return;
+    }
+    const { device = result.candidate, active } = result;
     if (type === 'hello' && ready) {
       const time = String(Math.floor(Date.now() / 1000));
       client.publish(topic + '/' + device.id + '/status', JSON.stringify({
@@ -64,7 +96,7 @@ export function bridge(db, config, changed) {
       }), { qos: 1 });
     }
     if (active) send(device, active);
-    if (type === 'tap' || device.seen < Date.now() - 25000) changed();
+    if (result.discovered || type === 'tap' || device.seen < deviceOnlineSince()) changed();
   }
   client?.on('connect', () => {
     client.subscribe(topic + '/+/event', { qos: 1 }, (error, grants) => {

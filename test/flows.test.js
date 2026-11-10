@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createECDH, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import Aedes from 'aedes';
 import mqtt from 'mqtt';
@@ -385,6 +385,71 @@ test('crédito em todas as contas e cobranças fixas ou percentuais para CNPJ', 
   assert.equal(otherCharge.team, other.id);
   await admin('/bank/charges/' + otherCharge.id + '/cancel', {});
   await second.request('/bank/charges/' + otherCharge.id + '/pay', {}, 409);
+});
+
+test('maquininhas online são descobertas e vinculadas sem nome nem chave', async t => {
+  const broker = Aedes();
+  const listener = createServer(broker.handle).listen(0, '127.0.0.1');
+  await once(listener, 'listening');
+  const url = 'mqtt://127.0.0.1:' + listener.address().port;
+  const { admin, students: [seller], team } = await setup({ MQTT_URL: url }, t, 1);
+  const client = mqtt.connect(url, { reconnectPeriod: 0, connectTimeout: 3000 });
+  t.after(async () => {
+    client.end(true);
+    await new Promise(resolve => broker.close(resolve));
+    await new Promise(resolve => listener.close(resolve));
+  });
+  await once(client, 'connect');
+  await client.subscribeAsync('bancofeira/v1/+/status');
+  await eventually(async () => (await admin('/home')).mqtt);
+  const replies = new Map();
+  client.on('message', (_, data) => {
+    const reply = JSON.parse(data);
+    replies.set(reply.nonce, reply);
+  });
+  async function discover(id) {
+    const exchange = createECDH('prime256v1');
+    const pub = exchange.generateKeys('hex');
+    async function hello(key) {
+      const nonce = randomBytes(16).toString('hex');
+      const sig = signature(key, 'hello', id, nonce, '', '');
+      await client.publishAsync('bancofeira/v1/' + id + '/event', JSON.stringify({ type: 'hello', nonce, sig, pub }), { qos: 1 });
+      await eventually(() => replies.has(nonce));
+      return replies.get(nonce);
+    }
+    const privateKey = exchange.getPrivateKey('hex');
+    const offer = await hello(privateKey);
+    const key = signature(exchange.computeSecret(offer.pub, 'hex'), 'device', 'bancofeira/v1', id);
+    const status = await hello(key);
+    assert.equal(status.sig, signature(key, 'status', id, status.nonce, status.time));
+    return { hello, privateKey, key, serverPublicKey: offer.pub };
+  }
+
+  await admin('/admin/devices', { deviceId: '0042' }, 404);
+  const terminal = await discover('0042');
+  const first = await seller.request('/home');
+  assert.deepEqual(first.availableDevices, [{ id: '0042', name: 'Maquininha 0042', online: true, discovered: true }]);
+  assert.equal(first.devices.length, 0);
+  await seller.request('/teams/' + team.id + '/device', { device: '0042' });
+  assert.equal((await seller.request('/home')).teams[0].device.id, '0042');
+  assert.equal((await admin('/home')).availableDevices.length, 0);
+  const reconnect = await terminal.hello(terminal.privateKey);
+  assert.equal(reconnect.pub, terminal.serverPublicKey);
+  const registeredStatus = await terminal.hello(terminal.key);
+  assert.equal(registeredStatus.sig, signature(terminal.key, 'status', '0042', registeredStatus.nonce, registeredStatus.time));
+  await admin('/admin/devices/0042/unlink', {});
+  assert.equal((await admin('/home')).availableDevices[0].id, '0042');
+  await admin('/admin/devices/0042/link', { team: team.id });
+
+  await discover('0043');
+  await admin('/admin/devices', { deviceId: '0043' }, 201);
+  const saved = await admin('/home');
+  assert.equal(saved.availableDevices[0].id, '0043');
+  assert.equal(saved.devices.find(device => device.id === '0043').team, null);
+  await discover('0044');
+  await discover('0044');
+  assert.ok(!(await admin('/home')).availableDevices.some(device => device.id === '0044'));
+  await admin('/admin/devices', { deviceId: '0044' }, 409);
 });
 
 test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conversão em Pix', async t => {
