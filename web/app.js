@@ -175,14 +175,19 @@ function adminPage() {
     section('Contas de venda', teams.length + (teams.length === 1 ? ' estabelecimento' : ' estabelecimentos'), teams.length ? '<div class="records">' + teams.map(x => record(x.name,
       'CNPJ ' + x.cnpj + ' · ' + (members.filter(m => m.team === x.id).map(m => students.find(s => s.id === m.student)?.name).join(', ') || 'Sem alunos autorizados'), 'shop',
       '<b>' + money(x.balance) + '</b>' + button('Crédito', 'credit', 'plus', 'ghost', x.id) +
+      button('Maquininha', 'pair', 'device', 'ghost', x.id) +
       button('Editar', 'team', 'edit', 'ghost', x.id) + button('Excluir', 'delete-account', 'trash', 'danger-ghost', x.id))).join('') + '</div>' : empty('Nenhum estabelecimento cadastrado', 'Cadastre pelo menos um aluno para operar a conta.', 'shop'));
   if (state.page === 'charges') return intro('CONTA DO BANCO', 'Cobranças', 'Lance taxas, impostos simulados ou aluguel para os estabelecimentos.', button('Nova cobrança', 'charge-new', 'plus')) +
     section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true));
   return intro('CARTÃO E CONECTIVIDADE', 'Maquininhas', 'Acompanhe a conexão e o CNPJ vinculado a cada ESP32.', button('Registrar maquininha', 'device', 'plus')) +
     section('Terminais RFID', 'Conexão do servidor com o broker MQTT', devices.length ? '<div class="records">' +
-      devices.map(d => record(d.name, d.teamName ? d.teamName + ' · CNPJ ' + teams.find(x => x.id === d.team)?.cnpj : 'Sem estabelecimento vinculado', 'device',
-        pill(d.online ? 'Online' : 'Offline', d.online ? 'good' : 'neutral') + button('Novo código', 'reset', null, 'ghost', d.id))).join('') +
-      '</div>' : empty('Nenhuma maquininha registrada', 'Registre o ESP32 para obter o código e a chave.', 'device'), pill(mqtt ? 'MQTT conectado' : 'MQTT indisponível', mqtt ? 'good' : 'neutral'));
+      devices.map(d => record(d.name, (/^\d{4}$/.test(d.id) ? 'ID ' + d.id + ' · ' : '') +
+        (d.teamName ? d.teamName + ' · CNPJ ' + teams.find(x => x.id === d.team)?.cnpj : 'Sem estabelecimento vinculado'), 'device',
+        pill(d.online ? 'Online' : 'Offline', d.online ? 'good' : 'neutral') +
+        button('Renomear', 'device-name', 'edit', 'ghost', d.id) +
+        (d.team ? button('Desvincular', 'device-unlink', null, 'danger-ghost', d.id) :
+          button('Vincular', 'device-link', 'device', 'ghost', d.id)))).join('') +
+      '</div>' : empty('Nenhuma maquininha registrada', 'Cadastre o ESP32 para disponibilizá-lo na lista.', 'device'), pill(mqtt ? 'MQTT conectado' : 'MQTT indisponível', mqtt ? 'good' : 'neutral'));
 }
 function record(title, subtitle, type, actions) {
   return '<div class="record"><span class="tile-icon purple">' + icon(type) + '</span><div class="record-name"><strong>' + esc(title) + '</strong><small>' + esc(subtitle) + '</small></div><div class="record-actions">' + actions + '</div></div>';
@@ -285,9 +290,30 @@ async function complete(path, data, message) {
   if (message) notice(message);
   await refresh(true);
 }
+function deviceOption(device) {
+  return { id: device.id, name: device.name + ' · ' + (device.online ? 'Online' : 'Offline') +
+    ' · ID ' + device.id.slice(0, 8) };
+}
+function selectTeamDevice(teamId) {
+  const { user, devices } = state.data;
+  const team = (user.role === 'admin' ? state.data.accounts : state.data.teams).find(account => account.id === teamId);
+  if (!team) throw new Error('Estabelecimento não encontrado.');
+  const current = devices.find(device => device.team === teamId);
+  if (current) {
+    showDialog('Maquininha vinculada', team.name, '<p>' + esc(current.name) + '</p><div class="result-actions">' +
+      (user.role === 'admin' ? button('Desvincular maquininha', 'device-unlink', null, 'danger-ghost', current.id) : '') + '</div>');
+    return;
+  }
+  const available = devices.filter(device => !device.team).map(deviceOption);
+  if (!available.length) throw new Error('Nenhuma maquininha disponível. O gestor pode cadastrar ou desvincular uma.');
+  showDialog('Vincular maquininha', team.name, form(select('Maquininha disponível', 'device', available), 'Vincular'));
+  onForm(data => complete(user.role === 'admin' ? '/admin/devices/' + data.device + '/link' : '/teams/' + teamId + '/device',
+    user.role === 'admin' ? { team: teamId } : data, 'Maquininha vinculada.'));
+}
 function credentials(title, data) {
   const values = [['ID da maquininha', data.id], ['Chave para o ESP32', data.key], ['Código para o estabelecimento', data.pairing]];
-  showDialog(title, 'Guarde estes dados antes de fechar.', values.filter(([, value]) => value).map(([label, value]) =>
+  showDialog(title, data.pairing || data.key ? 'Guarde estes dados antes de fechar.' :
+    'Cadastro salvo. A maquininha está disponível na lista para vincular.', values.filter(([, value]) => value).map(([label, value]) =>
     '<div class="credential"><label>' + label + '<input readonly value="' + esc(value) + '"></label>' +
     button('Copiar', 'copy', null, 'ghost', value) + '</div>').join(''));
 }
@@ -683,8 +709,16 @@ document.addEventListener('click', async e => {
         break;
       }
       case 'device':
-        showDialog('Registrar maquininha', 'Crie as credenciais de um ESP32 com leitor RC522.', form(input('Nome da maquininha', 'name', 'maxlength="50" placeholder="Ex. Maquininha 01"'), 'Registrar'));
-        onForm(async data => { const result = await api('/admin/devices', data); credentials('Maquininha registrada', result); await refresh(true); });
+        showDialog('Registrar maquininha', 'Cole o ID e a chave exibidos na página de configuração do ESP32.', form(
+          input('Nome da maquininha', 'name', 'maxlength="50" placeholder="Ex. Maquininha 01"') +
+          input('ID da maquininha', 'deviceId', 'maxlength="36" placeholder="Ex. 5831" autocapitalize="none" autocomplete="off"') +
+          input('Chave da maquininha', 'deviceKey', 'type="password" minlength="64" maxlength="64" autocapitalize="none" autocomplete="new-password"'),
+          'Registrar'));
+        onForm(async data => {
+          const { id } = await api('/admin/devices', data);
+          credentials('Maquininha registrada', { id });
+          await refresh(true);
+        });
         break;
       case 'reset':
         showDialog('Gerar novo código', 'A maquininha será desvinculada do estabelecimento atual e a cobrança por cartão em aberto será cancelada.', form('', 'Gerar código'));
@@ -712,9 +746,33 @@ document.addEventListener('click', async e => {
         onForm(() => complete('/admin/students/' + id + '/unlink', {}, 'Cartão desvinculado.'));
         break;
       case 'pair':
-        showDialog('Vincular maquininha', 'Use o código de vínculo fornecido pelo gestor.', form(input('Código de vínculo', 'pairing', 'minlength="12" maxlength="12"'), 'Vincular'));
-        onForm(data => complete('/teams/' + id + '/device', data, 'Maquininha vinculada.'));
+        selectTeamDevice(id);
         break;
+      case 'device-link': {
+        const device = devices.find(item => item.id === id);
+        if (!device) break;
+        const available = accounts.filter(account => account.role === 'team' && !devices.some(item => item.team === account.id));
+        if (!available.length) throw new Error('Nenhum estabelecimento sem maquininha está disponível.');
+        showDialog('Vincular maquininha', device.name, form(select('Estabelecimento', 'team', available), 'Vincular'));
+        onForm(data => complete('/admin/devices/' + id + '/link', data, 'Maquininha vinculada.'));
+        break;
+      }
+      case 'device-unlink': {
+        const device = devices.find(item => item.id === id);
+        if (!device) break;
+        showDialog('Desvincular maquininha', device.name,
+          form('<p>O terminal ficará disponível para outro estabelecimento. Cobranças no cartão e vínculos de cartão em andamento neste terminal serão cancelados.</p>', 'Desvincular', 'danger'));
+        onForm(() => complete('/admin/devices/' + id + '/unlink', {}, 'Maquininha desvinculada.'));
+        break;
+      }
+      case 'device-name': {
+        const device = devices.find(item => item.id === id);
+        if (!device) break;
+        showDialog('Renomear maquininha', 'Escolha um nome fácil de reconhecer na lista.', form(
+          input('Nome da maquininha', 'name', 'maxlength="50" value="' + esc(device.name) + '"'), 'Salvar nome'));
+        onForm(data => complete('/admin/devices/' + id + '/edit', data, 'Nome atualizado.'));
+        break;
+      }
       case 'sale': saleDialog(teams.find(x => x.id === id)); break;
       case 'sale-pix':
       case 'sale-cancel':
@@ -724,7 +782,7 @@ document.addEventListener('click', async e => {
         break;
       case 'card': {
         if (state.data.card?.status === 'pending') throw new Error('Já existe um vínculo em andamento.');
-        const online = devices.filter(x => x.online);
+        const online = devices.filter(x => x.online && x.team);
         if (!online.length) throw new Error('Nenhuma maquininha vinculada está online.');
         showDialog('Vincular cartão', 'Escolha o terminal perto de você. Depois, aproxime seu cartão em até 1 minuto.', form(select('Maquininha', 'device', online), 'Iniciar vínculo'));
         onForm(data => complete('/card', data, 'Aproxime seu cartão.'));

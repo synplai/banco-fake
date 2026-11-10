@@ -31,31 +31,34 @@ Use dois navegadores, ou uma janela anônima, para testar comprador e vendedor a
 
 Use **Editar** ao lado de um aluno para atualizar o nome, o usuário ou a senha. Ao trocar a senha, o aluno precisa entrar de novo. Na lista de **Estabelecimentos**, use **Editar** para alterar o nome, o CNPJ fictício e os alunos autorizados.
 
-Use **Excluir** para retirar um cadastro de uso. O histórico de movimentações continua disponível, e o saldo da conta excluída fica indisponível. Se excluir o último aluno autorizado de um estabelecimento, use **Editar** no estabelecimento para autorizar outro. Para reutilizar a maquininha de um estabelecimento excluído, gere um **Novo código** em **Maquininhas**.
+Use **Excluir** para retirar um cadastro de uso. O histórico de movimentações continua disponível, e o saldo da conta excluída fica indisponível. Se excluir o último aluno autorizado de um estabelecimento, use **Editar** no estabelecimento para autorizar outro. A maquininha de um estabelecimento excluído volta à lista de disponíveis.
 
 ## Maquininhas ESP32 e RC522
 
-O firmware em `firmware/` é para a placa ESP32 Dev Module e leitor MFRC522 (RC522) por SPI. Abra essa pasta em uma janela do VS Code com a extensão **PlatformIO IDE**.
+O firmware é para a placa ESP32 Dev Module e leitor MFRC522 (RC522) por SPI. No **Arduino IDE**, abra `firmware/BancoVirtualESP32/BancoVirtualESP32.ino`. Para usar o **PlatformIO IDE** no VS Code, abra a pasta `firmware/`.
 
 | RC522 | ESP32 |
 | --- | --- |
 | 3.3V | 3V3 |
 | GND | GND |
-| SDA / SS | GPIO 5 |
+| SDA / SS | GPIO 21 |
 | SCK | GPIO 18 |
 | MOSI | GPIO 23 |
 | MISO | GPIO 19 |
 | RST | GPIO 22 |
 | IRQ | Deixe desconectado |
 
-Alimente o RC522 com 3,3 V. Use cartões ou chaveiros compatíveis com o leitor, por exemplo MIFARE Classic de 13,56 MHz. O Wi-Fi deve oferecer 2,4 GHz e permitir acesso ao broker e à sincronização NTP do ESP32.
+Alimente o RC522 com 3,3 V. O LED verde usa o GPIO 12 e pisca quando a leitura é enviada ao broker. O resultado do vínculo ou pagamento aparece no site. Use cartões ou chaveiros compatíveis com o leitor, por exemplo MIFARE Classic de 13,56 MHz. O Wi-Fi deve oferecer 2,4 GHz e permitir acesso ao broker e à sincronização NTP do ESP32.
 
-1. No painel do gestor, abra **Maquininhas → Registrar maquininha**. Guarde o ID e a chave exibidos e entregue o código de vínculo ao aluno responsável pelo estabelecimento.
-2. Copie `firmware/src/config.example.h` para `firmware/src/config.h`. Preencha Wi-Fi, `DEVICE_ID` e `DEVICE_KEY`. Use um par diferente por ESP32.
-3. Grave pelo botão **Upload** do PlatformIO. O monitor serial a 115200 mostra a conexão e a leitura.
-4. Um aluno autorizado entra em **Meu estabelecimento → Vincular maquininha** e informa o código. O gestor passa a ver o CNPJ e o status do terminal.
-5. O aluno comprador abre **Minha conta → Vincular cartão**, escolhe um terminal vinculado e online e aproxima o cartão em até um minuto. O gestor acompanha quem tem cartão e pode desfazer o vínculo.
-6. Para cobrar, o vendedor abre **Meu estabelecimento → Efetuar venda**, digita o valor e toca **Cobrar no cartão**. Após a aproximação, o vendedor vê o resultado e pode converter a cobrança em Pix se necessário.
+1. No **Arduino IDE**, instale **MFRC522**, **PubSubClient** e **ArduinoJson 7**, selecione a placa e a porta USB e grave o sketch. O Wi-Fi e a identidade são configurados no navegador. No **PlatformIO**, o arquivo `firmware/src/config.h` é opcional para mudar o broker.
+2. Ligue a maquininha e conecte o celular à rede **BancoVirtual-…-Setup** com a senha **12345678**. Essa rede fica disponível enquanto a maquininha estiver ligada.
+3. Toque em **Fazer login na rede** se o celular oferecer essa opção. Se ela não aparecer, permaneça conectado ao Wi-Fi da maquininha e abra **http://192.168.4.1/**. Informe o SSID e a senha da rede de operação e toque em **Salvar e conectar**. O ESP32 reinicia e usa os dados gravados. Para trocar a senha depois, repita o mesmo procedimento.
+4. No primeiro salvamento, o ESP32 gera o ID de quatro dígitos e a chave secreta. Abra **Cadastro da maquininha** no portal para copiar os dois. Se já tiver credenciais de um cadastro anterior, você pode importá-las nessa seção antes de salvar o Wi-Fi.
+5. Depois que a maquininha se conectar ao Wi-Fi de operação, volte o celular à rede com internet para abrir o Banco Virtual.
+6. No site, como gestor, abra **Maquininhas → Registrar maquininha**, escolha um nome e cole o ID e a chave do aparelho. Se o ID estiver em uso por outra maquininha, volte ao portal para gerar outro antes de registrar.
+7. Um aluno autorizado entra em **Meu estabelecimento → Vincular maquininha** e escolhe um terminal disponível pelo nome. O gestor também pode vincular pelo menu **Maquininhas** ou pelo botão **Maquininha** na lista de **Estabelecimentos**. Use **Renomear** para mudar o nome do terminal ou **Desvincular** para liberá-lo para outra conta. A desvinculação cancela as operações de cartão em andamento naquele terminal.
+8. O aluno comprador abre **Minha conta → Vincular cartão**, escolhe um terminal vinculado e online e aproxima o cartão em até um minuto. O gestor acompanha quem tem cartão e pode desfazer o vínculo.
+9. Para cobrar, o vendedor abre **Meu estabelecimento → Efetuar venda**, digita o valor e toca **Cobrar no cartão**. Após a aproximação, o vendedor vê o resultado e pode converter a cobrança em Pix se necessário.
 
 O broker informado já consta nos exemplos: `tokaido.proxy.rlwy.net:17906`. A configuração fornecida usa MQTT em TCP. As mensagens são assinadas com HMAC por maquininha. Para criptografar o transporte, configure um listener TLS no broker, use `mqtts://` no servidor e habilite `MQTT_TLS` com a CA correspondente no firmware. Se o broker exigir credenciais, configure `MQTT_USER` e `MQTT_PASSWORD`. Use o mesmo `MQTT_PREFIX` no servidor e nos terminais. Em um broker compartilhado, use um prefixo exclusivo desta instalação e, se disponível, permissões por tópico.
 

@@ -162,7 +162,7 @@ export async function createApp(db, config = process.env) {
       team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
       team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL ORDER BY c.created DESC', team.id);
     }
-    res.json({ user, teams, activity: await activity(db, user.id), devices: await devices('WHERE d.team IS NOT NULL'),
+    res.json({ user, teams, activity: await activity(db, user.id), devices: await devices(),
       card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
   });
 
@@ -336,8 +336,17 @@ export async function createApp(db, config = process.env) {
     manager(req);
     const name = normalize(req.body.name);
     check(name.length >= 2 && name.length <= 50, 'Informe um nome para a maquininha.');
-    const id = uid(), key = secret(), pairing = secret().slice(0, 12).toUpperCase();
-    await run(db, 'INSERT INTO devices (id,name,key,pairing) VALUES (?,?,?,?)', id, name, key, hash(pairing));
+    const providedId = normalize(req.body.deviceId).toLowerCase();
+    const providedKey = normalize(req.body.deviceKey).toLowerCase();
+    if (req.body.deviceId !== undefined || req.body.deviceKey !== undefined) {
+      check(/^(?:[0-9]{4}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/.test(providedId) &&
+        /^[a-f0-9]{64}$/.test(providedKey), 'Informe o ID e a chave exibidos na maquininha.');
+    }
+    const id = providedId || uid(), key = providedKey || secret(), pairing = secret().slice(0, 12).toUpperCase();
+    await transaction(db, async db => {
+      check(!await get(db, 'SELECT 1 FROM devices WHERE id=?', id), 'Este ID já está cadastrado. Confira a lista de maquininhas.', 409);
+      await run(db, 'INSERT INTO devices (id,name,key,pairing) VALUES (?,?,?,?)', id, name, key, hash(pairing));
+    });
     res.status(201).json({ id, key, pairing });
   });
   api.post('/admin/devices/:id/reset', async (req, res) => {
@@ -350,6 +359,39 @@ export async function createApp(db, config = process.env) {
     });
     res.json({ pairing });
   });
+  async function linkDevice(db, team, id) {
+    check(typeof team === 'string' && typeof id === 'string', 'Selecione o estabelecimento e a maquininha.');
+    check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", team),
+      'Estabelecimento não encontrado.', 404);
+    const device = await get(db, 'SELECT team FROM devices WHERE id=?', id);
+    check(device, 'Maquininha não encontrada.', 404);
+    if (device.team === team) return;
+    check(!device.team, 'Esta maquininha já está vinculada a outro estabelecimento.', 409);
+    check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
+    await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE id=?', team, id);
+  }
+  api.post('/admin/devices/:id/link', async (req, res) => {
+    manager(req);
+    await transaction(db, db => linkDevice(db, req.body.team, req.params.id));
+    res.json({ ok: true });
+  });
+  api.post('/admin/devices/:id/unlink', async (req, res) => {
+    manager(req);
+    await transaction(db, async db => {
+      check(await get(db, 'SELECT 1 FROM devices WHERE id=?', req.params.id), 'Maquininha não encontrada.', 404);
+      await run(db, "UPDATE operations SET status='cancelled' WHERE device=? AND status='pending'", req.params.id);
+      await run(db, 'UPDATE devices SET team=NULL,pairing=NULL WHERE id=?', req.params.id);
+    });
+    res.json({ ok: true });
+  });
+  api.post('/admin/devices/:id/edit', async (req, res) => {
+    manager(req);
+    const name = normalize(req.body.name);
+    check(name.length >= 2 && name.length <= 50, 'Informe um nome de 2 a 50 caracteres.');
+    const result = await run(db, 'UPDATE devices SET name=? WHERE id=?', name, req.params.id);
+    check(result.changes, 'Maquininha não encontrada.', 404);
+    res.json({ ok: true });
+  });
   api.post('/admin/students/:id/unlink', async (req, res) => {
     manager(req);
     await transaction(db, async db => {
@@ -361,12 +403,15 @@ export async function createApp(db, config = process.env) {
   api.post('/teams/:team/device', async (req, res) => {
     const team = req.params.team;
     const pairing = normalize(req.body.pairing).toUpperCase();
-    check(/^[A-F0-9]{12}$/.test(pairing), 'Informe o código de vínculo de 12 caracteres.');
     await transaction(db, async db => {
       await teamAccess(db, req, team);
-      check(!await get(db, 'SELECT 1 FROM devices WHERE team=?', team), 'O estabelecimento já tem uma maquininha.', 409);
-      const result = await run(db, 'UPDATE devices SET team=?,pairing=NULL WHERE pairing=? AND team IS NULL', team, hash(pairing));
-      check(result.changes, 'Código de vínculo inválido ou já usado.', 404);
+      let id = req.body.device;
+      if (id === undefined) {
+        check(/^[A-F0-9]{12}$/.test(pairing), 'Selecione uma maquininha disponível.');
+        id = (await get(db, 'SELECT id FROM devices WHERE pairing=? AND team IS NULL', hash(pairing)))?.id;
+        check(id, 'Código de vínculo inválido ou já usado.', 404);
+      }
+      await linkDevice(db, team, id);
     });
     res.json({ ok: true });
   });

@@ -181,6 +181,40 @@ test('exclusão revoga o acesso e libera vínculos, preservando o histórico', a
   await replacement.request('/teams/' + newTeam.id + '/device', { pairing });
 });
 
+test('maquininhas são listadas, nomeadas e vinculadas sem digitar códigos', async t => {
+  const { admin, students, team } = await setup({}, t, 1);
+  const [seller, second, outsider] = students;
+  await admin('/admin/teams', { name: 'Outro comércio', cnpj: '00000000000177', members: [second.id] }, 201);
+  const other = (await second.request('/home')).teams[0];
+  const device = await admin('/admin/devices', { name: 'Terminal inicial' }, 201);
+  const spare = await admin('/admin/devices', { name: 'Terminal reserva' }, 201);
+  const available = (await seller.request('/home')).devices.find(item => item.id === device.id);
+  assert.equal(available.team, null);
+  assert.equal(available.name, 'Terminal inicial');
+  assert.equal(available.key, undefined);
+  await seller.request('/admin/devices/' + device.id + '/edit', { name: 'Nome proibido' }, 403);
+  await admin('/admin/devices/' + device.id + '/edit', { name: 'Caixa principal' });
+  assert.equal((await seller.request('/home')).devices.find(item => item.id === device.id).name, 'Caixa principal');
+  await outsider.request('/teams/' + team.id + '/device', { device: device.id }, 403);
+  await seller.request('/teams/' + team.id + '/device', { device: device.id });
+  await seller.request('/teams/' + team.id + '/device', { device: device.id });
+  await second.request('/teams/' + other.id + '/device', { device: device.id }, 409);
+  await admin('/admin/devices/' + spare.id + '/link', { team: team.id }, 409);
+  await seller.request('/admin/devices/' + device.id + '/unlink', {}, 403);
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  assert.equal((await seller.request('/home')).teams[0].device, null);
+  const contenders = await Promise.allSettled([
+    seller.request('/teams/' + team.id + '/device', { device: device.id }),
+    second.request('/teams/' + other.id + '/device', { device: device.id })
+  ]);
+  assert.equal(contenders.filter(result => result.status === 'fulfilled').length, 1);
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  await admin('/admin/devices/' + device.id + '/link', { team: other.id });
+  assert.equal((await second.request('/home')).teams[0].device.id, device.id);
+  assert.equal((await admin('/home')).devices.find(item => item.id === device.id).team, other.id);
+});
+
 test('Pix independente de MQTT, QR Code, autorização, SSE e pagamento idempotente', async t => {
   const { admin, students, team, credit, session } = await setup({}, t, 1);
   const [seller, , secondBuyer, buyer] = students;
@@ -356,7 +390,13 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   const url = 'mqtt://127.0.0.1:' + listener.address().port;
   const { admin, students, team, credit } = await setup({ MQTT_URL: url }, t);
   const [seller, second, , buyer] = students;
-  const device = await admin('/admin/devices', { name: 'RC522 de teste' }, 201);
+  const registration = { name: 'RC522 de teste', deviceId: '5831', deviceKey: randomBytes(32).toString('hex') };
+  await buyer.request('/admin/devices', registration, 403);
+  await admin('/admin/devices', { ...registration, deviceKey: '1234' }, 400);
+  const device = await admin('/admin/devices', registration, 201);
+  assert.equal(device.id, registration.deviceId);
+  assert.equal(device.key, registration.deviceKey);
+  await admin('/admin/devices', registration, 409);
   const client = mqtt.connect(url, { reconnectPeriod: 0, connectTimeout: 3000 });
   t.after(async () => {
     client.end(true);
@@ -416,4 +456,9 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await seller.request('/activity/' + sale.id + '/refund', {});
   assert.equal((await buyer.request('/home')).user.balance, 3500);
   assert.equal((await seller.request('/home')).teams[0].balance, 4000);
+  const cancelled = await seller.request(salePath, { amount: 500, method: 'rfid' }, 201);
+  await admin('/admin/devices/' + device.id + '/unlink', {});
+  await send('tap', cancelled.id, card);
+  assert.equal((await seller.request('/home')).teams[0].sale.status, 'cancelled');
+  assert.equal((await buyer.request('/home')).user.balance, 3500);
 });
