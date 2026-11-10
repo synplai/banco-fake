@@ -66,6 +66,8 @@ export async function bridge(db, config, changed) {
       const event = await run(db, 'INSERT INTO tap_events VALUES (?,?,?) ON CONFLICT DO NOTHING', id, nonce, Date.now());
       if (!event.changes) return { device };
       await run(db, 'DELETE FROM tap_events WHERE created<?', Date.now() - 86400000);
+      // Keep the tap result even when one of the payment entries has to be rolled back.
+      await run(db, 'SAVEPOINT process_tap');
       try {
         if (current.kind === 'card') {
           const owner = await get(db, 'SELECT id FROM accounts WHERE card=?', card);
@@ -79,8 +81,10 @@ export async function bridge(db, config, changed) {
         }
       } catch (error) {
         if (!(error instanceof Rule)) throw error;
+        await run(db, 'ROLLBACK TO SAVEPOINT process_tap');
         await run(db, 'UPDATE operations SET detail=? WHERE id=?', error.message, current.id);
       }
+      await run(db, 'RELEASE SAVEPOINT process_tap');
       return { device };
     });
     if (!result) return;

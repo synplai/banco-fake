@@ -512,15 +512,29 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await eventually(async () => (await second.request('/home')).card.detail?.includes('outra conta'));
   await second.request('/card/' + duplicate.id + '/cancel', {});
 
-  await credit(buyer.id, 5000);
+  assert.equal((await admin('/home')).terminalFeeRate, 0);
+  await seller.request('/bank/terminal-fee', { rate: 1000 }, 403);
+  await admin('/bank/terminal-fee', { rate: 10001 }, 400);
+  await admin('/bank/terminal-fee', { rate: 1000 });
+  assert.equal((await admin('/home')).terminalFeeRate, 1000);
+  await credit(buyer.id, 4000);
   const salePath = '/teams/' + team.id + '/sales';
-  const sale = await seller.request(salePath, { amount: 2000, method: 'rfid' }, 201);
+  const sale = await seller.request(salePath, { amount: 1000, method: 'rfid' }, 201);
   await eventually(() => armed?.op === sale.id);
   const nonce = randomBytes(16).toString('hex');
   await send('tap', sale.id, card, nonce);
   await send('tap', sale.id, card, nonce);
   await eventually(async () => (await seller.request('/home')).teams[0].sale.status === 'paid');
   assert.equal((await buyer.request('/home')).user.balance, 3000);
+  const { teams: [paidTeam] } = await seller.request('/home');
+  assert.equal(paidTeam.balance, 900);
+  const bank = (await admin('/home')).user;
+  assert.equal(bank.balance, 100);
+  const [fee] = paidTeam.activity.filter(entry => entry.method === 'terminal_fee');
+  assert.equal(paidTeam.activity.filter(entry => entry.method === 'terminal_fee').length, 1);
+  assert.deepEqual([fee.payer, fee.payee, fee.amount], [team.id, bank.id, 100]);
+  assert.deepEqual(paidTeam.activity.filter(entry => entry.id === sale.id).map(entry => [entry.payee, entry.amount]), [[team.id, 1000]]);
+  await admin('/bank/terminal-fee', { rate: 2000 });
 
   const fallback = await seller.request(salePath, { amount: 4000, method: 'rfid' }, 201);
   await send('tap', fallback.id, card);
@@ -531,11 +545,33 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   await credit(buyer.id, 2500);
   await buyer.request('/pix/' + fallback.id, {});
   assert.equal((await buyer.request('/home')).user.balance, 1500);
-  assert.equal((await seller.request('/home')).teams[0].balance, 6000);
-  assert.equal((await seller.request('/activity/' + sale.id)).canRefund, true);
-  await seller.request('/activity/' + sale.id + '/refund', {});
-  assert.equal((await buyer.request('/home')).user.balance, 3500);
+  assert.equal((await seller.request('/home')).teams[0].balance, 4900);
+  assert.equal((await admin('/home')).user.balance, 100);
+  const receipt = await seller.request('/activity/' + sale.id);
+  assert.equal(receipt.canRefund, true);
+  assert.equal(receipt.terminalFee, 100);
+  const reversal = await seller.request('/activity/' + sale.id + '/refund', {});
+  assert.deepEqual(await seller.request('/activity/' + sale.id + '/refund', {}), reversal);
+  assert.equal((await buyer.request('/home')).user.balance, 2500);
   assert.equal((await seller.request('/home')).teams[0].balance, 4000);
+  assert.equal((await admin('/home')).user.balance, 0);
+  const feeReceipt = await seller.request('/activity/' + fee.id);
+  assert.ok(feeReceipt.refundId);
+  assert.equal((await seller.request('/activity/' + feeReceipt.refundId)).amount, 100);
+
+  const bankLimit = 100_000_000_000;
+  await credit(team.id, bankLimit - 4000);
+  await admin('/bank/charges', { team: team.id, type: 'fixed', value: bankLimit, description: 'Limite do banco', request: randomBytes(16).toString('hex') }, 201);
+  const [charge] = (await seller.request('/home')).teams[0].charges;
+  await seller.request('/bank/charges/' + charge.id + '/pay', {});
+  const blocked = await seller.request(salePath, { amount: 1000, method: 'rfid' }, 201);
+  await send('tap', blocked.id, card);
+  await eventually(async () => (await seller.request('/home')).teams[0].sale.detail?.includes('limite de saldo'));
+  assert.equal((await buyer.request('/home')).user.balance, 2500);
+  assert.equal((await seller.request('/home')).teams[0].balance, 0);
+  await seller.request('/activity/' + blocked.id, undefined, 404);
+  await seller.request(salePath + '/' + blocked.id + '/cancel', {});
+
   const cancelled = await seller.request(salePath, { amount: 500, method: 'rfid' }, 201);
   const remove = '/admin/devices/' + device.id + '/delete';
   await seller.request(remove, {}, 403);
@@ -547,7 +583,7 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   assert.ok(!devices.some(item => item.id === device.id));
   assert.equal((await seller.request('/activity/' + sale.id)).id, sale.id);
   const { user } = await buyer.request('/home');
-  assert.equal(user.balance, 3500);
+  assert.equal(user.balance, 2500);
   assert.equal(user.hasCard, 1);
   await admin('/admin/devices', { ...registration, deviceKey: randomBytes(32).toString('hex') }, 201);
   await admin('/admin/devices/' + device.id + '/link', { team: team.id });

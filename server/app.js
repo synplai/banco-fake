@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { fileURLToPath } from 'node:url';
 import {
   activity, all, deadline, expire, get, hash, initAdmin, moneyLimit, passwordHash,
-  requireRule as check, Rule, run, secret, settle, transaction, transfer, uid, verifyPassword
+  requireRule as check, Rule, run, secret, settle, terminalFeeRate, transaction, transfer, uid, verifyPassword
 } from './db.js';
 import { bridge, deviceOnlineSince } from './mqtt.js';
 import { keyCandidates, normalizeKey, registeredTypes } from './pix-keys.js';
@@ -160,6 +160,7 @@ export async function createApp(db, config = process.env) {
       const accounts = await all(db, "SELECT " + userFields + " FROM accounts WHERE role<>'admin' AND deleted_at IS NULL ORDER BY name");
       const members = await all(db, 'SELECT team,student FROM members');
       return res.json({ user, accounts, members, devices: await devices(), availableDevices: await availableDevices(), mqtt: mqtt.ready(),
+        terminalFeeRate: await terminalFeeRate(db),
         charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
         activity: await all(db,
         'SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName" FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee ORDER BY l.created DESC LIMIT 40') });
@@ -296,6 +297,13 @@ export async function createApp(db, config = process.env) {
       return targets.length;
     });
     res.json({ ok: true, count });
+  });
+  api.post('/bank/terminal-fee', async (req, res) => {
+    manager(req);
+    const { rate } = req.body;
+    check(Number.isInteger(rate) && rate >= 0 && rate <= 10000, 'Informe um percentual entre 0% e 100%.');
+    await run(db, 'INSERT INTO terminal_fee_config (id,rate) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET rate=excluded.rate', rate);
+    res.json({ ok: true });
   });
   api.post('/bank/charges', async (req, res) => {
     manager(req);
@@ -641,10 +649,12 @@ export async function createApp(db, config = process.env) {
     const entry = await get(db, `SELECT l.id,l.payer,l.payee,l.amount,l.created,l.method,
       p.name AS "fromName",p.role AS "fromRole",p.username AS "fromUser",p.cnpj AS "fromCnpj",
       a.name AS "toName",a.role AS "toRole",a.username AS "toUser",a.cnpj AS "toCnpj",
-      p.deleted_at AS "payerDeleted",r.reversal AS "refundId",original.original AS "originalId",c.description
+      p.deleted_at AS "payerDeleted",r.reversal AS "refundId",original.original AS "originalId",c.description,
+      fee.amount AS "terminalFee"
       FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts a ON a.id=l.payee
       LEFT JOIN refunds r ON r.original=l.id LEFT JOIN refunds original ON original.reversal=l.id
       LEFT JOIN bank_charges c ON c.id=l.id
+      LEFT JOIN terminal_fees tf ON tf.sale=l.id LEFT JOIN ledger fee ON fee.id=tf.charge
       WHERE l.id=?`, req.params.id);
     check(entry, 'Movimentação não encontrada.', 404);
     const receiver = await canOperate(db, req, entry.payee);
@@ -658,8 +668,18 @@ export async function createApp(db, config = process.env) {
       check(refundable(entry), 'Esta movimentação não pode ser devolvida.', 409);
       const previous = await get(db, 'SELECT reversal FROM refunds WHERE original=?', entry.id);
       if (previous) return previous.reversal;
+      const fee = await get(db, 'SELECT l.id,l.payee,l.amount FROM terminal_fees f JOIN ledger l ON l.id=f.charge WHERE f.sale=?', entry.id);
+      const returnFee = async () => {
+        const reversal = uid();
+        await transfer(db, { id: reversal, payer: fee.payee, payee: entry.payee, amount: fee.amount, method: 'terminal_fee_refund', actor: req.user.id });
+        await run(db, 'INSERT INTO refunds (original,reversal) VALUES (?,?)', fee.id, reversal);
+      };
+      // If the gross refund needs the returned fee, credit it first. Otherwise pay first to leave room for the credit.
+      const feeFirst = fee && (await get(db, 'SELECT balance FROM accounts WHERE id=?', entry.payee)).balance < entry.amount;
+      if (feeFirst) await returnFee();
       const id = uid();
       await transfer(db, { id, payer: entry.payee, payee: entry.payer, amount: entry.amount, method: 'refund', actor: req.user.id });
+      if (fee && !feeFirst) await returnFee();
       await run(db, 'INSERT INTO refunds (original,reversal) VALUES (?,?)', entry.id, id);
       return id;
     });

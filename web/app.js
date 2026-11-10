@@ -106,7 +106,8 @@ function loginView() {
     '<div class="login-note">' + icon('card') + '<span>Todos os saldos e pagamentos são fictícios.</span></div></div></section></main>';
 }
 
-const methods = { credit: 'Crédito do gestor', pix: 'Pix', rfid: 'Cartão RFID', refund: 'Devolução', fee: 'Cobrança do banco' };
+const methods = { credit: 'Crédito do gestor', pix: 'Pix', rfid: 'Cartão RFID', refund: 'Devolução',
+  fee: 'Cobrança do banco', terminal_fee: 'Taxa da maquininha', terminal_fee_refund: 'Devolução da taxa da maquininha' };
 function activity(rows, owner) {
   if (!rows.length) return empty('Tudo pronto por aqui', 'As movimentações aparecem neste espaço.');
   return '<ul class="activity">' + rows.map(row => {
@@ -149,8 +150,9 @@ function drawPage() {
 }
 const intro = (eyebrow, title, subtitle, right = '') => '<div class="intro"><div><span class="eyebrow">' + esc(eyebrow) + '</span><h1>' + esc(title) + '</h1><p>' + esc(subtitle) + '</p></div>' + right + '</div>';
 const metrics = (label, value, description, type, style) => '<div class="metric"><span class="tile-icon ' + style + '">' + icon(type) + '</span><span>' + label + '</span><strong>' + value + '</strong><small>' + description + '</small></div>';
+const percentText = rate => (rate / 100).toLocaleString('pt-BR');
 function adminPage() {
-  const { accounts, members, devices, availableDevices, mqtt, charges, activity: rows } = state.data;
+  const { accounts, members, devices, availableDevices, mqtt, charges, terminalFeeRate, activity: rows } = state.data;
   const students = accounts.filter(x => x.role === 'student');
   const teams = accounts.filter(x => x.role === 'team');
   if (state.page === 'overview') {
@@ -181,6 +183,7 @@ function adminPage() {
   if (state.page === 'charges') return intro('CONTA DO BANCO', 'Cobranças', 'Lance taxas, impostos simulados ou aluguel para os estabelecimentos.', button('Nova cobrança', 'charge-new', 'plus')) +
     section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true));
   return intro('CARTÃO E CONECTIVIDADE', 'Maquininhas', 'Gerencie os terminais e seus vínculos.', button('Registrar pelo ID', 'device', 'plus')) +
+    section('Taxa da maquininha', percentText(terminalFeeRate) + '% por venda no cartão', '', button('Configurar taxa', 'terminal-fee', 'edit', 'ghost')) +
     section('Disponíveis para vincular', 'Maquininhas online e sem estabelecimento.', availableDevices.length ? '<div class="records">' +
       availableDevices.map(d => record(d.name, 'ID ' + d.id, 'device', button('Vincular', 'device-link', 'device', 'ghost', d.id))).join('') +
       '</div>' : empty('Nenhuma maquininha disponível', 'Ligue uma maquininha e conecte-a ao Wi-Fi.', 'device'),
@@ -515,7 +518,9 @@ async function refundDialog(id) {
   const label = entry.method === 'rfid' ? 'Estornar venda' : 'Devolver valor';
   showDialog(label, 'O valor integral voltará para a conta de origem.', form(
     '<div class="key-value"><span>PARA ' + esc(entry.fromName) + '</span><strong>' + money(entry.amount) + '</strong></div>' +
-    '<p class="field-help">Sai do saldo de ' + esc(entry.toName) + '.</p><div class="payment-feedback"></div>',
+    '<p class="field-help">Sai do saldo de ' + esc(entry.toName) + '.</p>' +
+    (entry.terminalFee ? '<p class="field-help">O banco devolve a taxa de ' + money(entry.terminalFee) + ' ao estabelecimento.</p>' : '') +
+    '<div class="payment-feedback"></div>',
     'Confirmar devolução', 'danger'));
   paymentAction('/activity/' + id + '/refund', {}, 'Valor devolvido');
 }
@@ -525,7 +530,7 @@ function newChargeDialog(accounts) {
   const request = requestId();
   showDialog('Nova cobrança', 'O pagamento será recebido na conta do banco.', form(
     select('Estabelecimento', 'team', [{ id: 'all', name: 'Todos os estabelecimentos' }, ...teams]) +
-    input('Descrição da cobrança', 'description', 'maxlength="80" placeholder="Ex. Taxa de maquininha, IPTU ou aluguel"') +
+    input('Descrição da cobrança', 'description', 'maxlength="80" placeholder="Ex. IPTU ou aluguel"') +
     select('Forma de cálculo', 'type', [{ id: 'fixed', name: 'Valor fixo' }, { id: 'percent', name: 'Percentual do saldo' }], 'fixed') +
     input('<span data-charge-label>Valor em reais</span>', 'value', 'inputmode="decimal" placeholder="25,00"') +
     '<p class="field-help" data-charge-help></p>', 'Lançar cobrança'));
@@ -807,6 +812,12 @@ document.addEventListener('click', async e => {
       case 'pix-keys': await keysDialog(pixAccount(id)); break;
       case 'receipt': await receiptDialog(id); break;
       case 'refund': await refundDialog(id); break;
+      case 'terminal-fee':
+        showDialog('Configurar taxa da maquininha', 'O banco recebe esse percentual de cada venda no cartão.', form(
+          input('Taxa (%)', 'rate', 'inputmode="decimal" maxlength="6" value="' + percentText(state.data.terminalFeeRate) + '"') +
+          '<p class="field-help">Use 0% para desativar a taxa.</p>', 'Salvar taxa'));
+        onForm(data => complete('/bank/terminal-fee', { rate: cents(data.rate) }, 'Taxa da maquininha atualizada.'));
+        break;
       case 'charge-new': newChargeDialog(accounts); break;
       case 'charge-pay': payChargeDialog(id, teams); break;
       case 'charge-cancel': {

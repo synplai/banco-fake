@@ -78,7 +78,9 @@ No celular, o navegador exige HTTPS e permissão de câmera para leitura ao vivo
 
 ## Cobranças do banco
 
-No painel do gestor, abra **Cobranças → Nova cobrança**. Informe a descrição (por exemplo, taxa da maquininha, IPTU fictício ou aluguel) e escolha um estabelecimento ou todos. O valor pode ser fixo ou um percentual do saldo disponível no momento do lançamento. Se o percentual resultar em R$ 0,00 para uma conta, ela não recebe a cobrança.
+Em **Maquininhas → Configurar taxa**, o gestor define um percentual para todas as vendas no cartão. O banco usa a taxa vigente na confirmação do pagamento e arredonda para centavos. Com 10% em uma venda de R$ 10,00, o extrato do estabelecimento mostra R$ 10,00 de crédito da venda e R$ 1,00 de débito da taxa, creditado na conta do banco. Pix não tem essa taxa. No estorno da venda, o banco devolve a taxa original ao estabelecimento.
+
+No painel do gestor, abra **Cobranças → Nova cobrança** para lançar cobranças como IPTU fictício ou aluguel. Escolha um estabelecimento ou todos e informe um valor fixo ou um percentual do saldo disponível no momento do lançamento. Se o percentual resultar em R$ 0,00 para uma conta, ela não recebe a cobrança.
 
 Em **Meu estabelecimento → Cobranças do banco**, os alunos autorizados veem o que está pendente e podem pagar. O saldo do estabelecimento só é debitado na confirmação. O valor é creditado na **Conta do banco**, cujo saldo aparece na visão geral do gestor. O pagamento gera comprovante no extrato.
 

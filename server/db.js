@@ -67,6 +67,12 @@ const schema = `
     );
     CREATE INDEX IF NOT EXISTS ledger_payer ON ledger(payer,created);
     CREATE INDEX IF NOT EXISTS ledger_payee ON ledger(payee,created);
+    CREATE TABLE IF NOT EXISTS terminal_fee_config (
+      id INTEGER PRIMARY KEY CHECK(id=1), rate INTEGER NOT NULL CHECK(rate BETWEEN 0 AND 10000)
+    );
+    CREATE TABLE IF NOT EXISTS terminal_fees (
+      sale TEXT PRIMARY KEY REFERENCES ledger(id), charge TEXT NOT NULL UNIQUE REFERENCES ledger(id)
+    );
     CREATE TABLE IF NOT EXISTS refunds (
       original TEXT PRIMARY KEY REFERENCES ledger(id), reversal TEXT NOT NULL UNIQUE REFERENCES ledger(id)
     );
@@ -190,6 +196,9 @@ export const all = (db, sql, ...args) => db.all(sql, args);
 export const run = (db, sql, ...args) => db.run(sql, args);
 export const transaction = (db, work) => db.transaction(work);
 export const expire = db => run(db, "UPDATE operations SET status='expired' WHERE status='pending' AND expires<=?", Date.now());
+export async function terminalFeeRate(db) {
+  return (await get(db, 'SELECT rate FROM terminal_fee_config WHERE id=1'))?.rate ?? 0;
+}
 
 export async function transfer(db, { id = uid(), payer = null, payee, amount, method, actor, request = null }) {
   if (request && await get(db, 'SELECT 1 FROM ledger WHERE request=?', request)) return;
@@ -206,6 +215,16 @@ export async function transfer(db, { id = uid(), payer = null, payee, amount, me
 export async function settle(db, op, payer, method, actor = payer) {
   requireRule(op.status === 'pending' && op.method === method, 'Esta cobrança não está disponível.', 409);
   await transfer(db, { id: op.id, payer, payee: op.owner, amount: op.amount, method, actor });
+  if (method === 'rfid') {
+    const fee = Math.round(op.amount * await terminalFeeRate(db) / 10000);
+    if (fee > 0) {
+      const bank = await get(db, "SELECT id FROM accounts WHERE role='admin' AND deleted_at IS NULL");
+      requireRule(bank, 'Conta do banco indisponível.', 409);
+      const charge = uid();
+      await transfer(db, { id: charge, payer: op.owner, payee: bank.id, amount: fee, method: 'terminal_fee', actor });
+      await run(db, 'INSERT INTO terminal_fees (sale,charge) VALUES (?,?)', op.id, charge);
+    }
+  }
   await run(db, "UPDATE operations SET status='paid',detail=NULL WHERE id=?", op.id);
 }
 export function activity(db, account) {
