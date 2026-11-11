@@ -1,7 +1,7 @@
 const app = document.querySelector('#app');
 const modal = document.querySelector('#dialog');
 const toast = document.querySelector('#toast');
-const state = { data: null, page: 'overview', balance: true, running: false, loginError: '' };
+const state = { data: null, page: 'overview', balance: true, running: false, loginError: '', dre: null };
 let timer, camera, scanFrame, events, generation = 0, refreshQueued = false;
 const paths = {
   home: '<path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 21v-7h6v7"/>',
@@ -77,6 +77,7 @@ async function refresh(force = false) {
       events?.close();
       events = null;
       state.data = null;
+      state.dre = null;
       if (!document.querySelector('#login-form')) render();
     } else if (force || !state.data) {
       if (!state.data) render();
@@ -119,7 +120,7 @@ function activity(rows, owner) {
   }).join('') + '</ul>';
 }
 const adminNav = [['overview', 'Visão geral', 'home'], ['students', 'Alunos', 'users'], ['teams', 'Estabelecimentos', 'shop'],
-  ['charges', 'Cobranças', 'history'], ['devices', 'Maquininhas', 'device']];
+  ['charges', 'Cobranças', 'history'], ['devices', 'Maquininhas', 'device'], ['dre', 'DRE', 'history']];
 const studentNav = [['overview', 'Minha conta', 'home'], ['teams', 'Meu estabelecimento', 'shop']];
 const navItems = () => state.data.user.role === 'admin' ? adminNav : studentNav.filter(item => item[0] !== 'teams' || state.data.teams.length);
 function render() {
@@ -156,6 +157,7 @@ function adminPage() {
   const students = accounts.filter(x => x.role === 'student');
   const teams = accounts.filter(x => x.role === 'team');
   const bankDevice = devices.find(device => device.team === user.id);
+  if (state.page === 'dre') return drePage();
   if (state.page === 'overview') {
     return intro('PAINEL DO GESTOR', 'Visão geral do banco', 'Acompanhe contas, estabelecimentos e pagamentos em um só lugar.', button('Liberar saldo', 'credit', 'plus')) +
       '<div class="hero admin-hero"><div><span class="eyebrow"><i></i> BANCO VIRTUAL</span><h2>Dinheiro de brincadeira.<br>Aprendizado de verdade.</h2><p>Cadastre alunos, organize os estabelecimentos e dê início às vendas.</p></div><div class="hero-mark" aria-hidden="true">B<span>.</span></div><span class="hero-index">01 &nbsp; / &nbsp; SIMULAÇÃO</span></div>' +
@@ -189,7 +191,7 @@ function adminPage() {
       button('Maquininha', 'pair', 'device', 'ghost', x.id) +
       button('Editar', 'team', 'edit', 'ghost', x.id) + button('Excluir', 'delete-account', 'trash', 'danger-ghost', x.id))).join('') + '</div>' : empty('Nenhum estabelecimento cadastrado', 'Cadastre pelo menos um aluno para operar a conta.', 'shop'));
   if (state.page === 'charges') return intro('CONTA DO BANCO', 'Cobranças', 'Salve cobranças e envie aos estabelecimentos quando quiser.', button('Nova cobrança', 'charge-new', 'plus')) +
-    section('Cobranças salvas', 'Use Lançar cobrança a cada vez que quiser cobrar.', chargeTemplates.length ? '<div class="records charge-records">' +
+    section('Cobranças salvas', 'Use Lançar cobrança a cada vez que quiser cobrar.', chargeTemplates.length ? '<div class="records">' +
       chargeTemplates.map(charge => record(charge.description, chargeTarget(charge, teams), 'history',
         '<b>' + chargeValue(charge) + '</b>' + button('Lançar cobrança', 'charge-launch', 'arrow', 'primary', charge.id) +
         button('Editar', 'charge-edit', 'edit', 'ghost', charge.id) + button('Excluir', 'charge-template-delete', 'trash', 'danger-ghost', charge.id))).join('') + '</div>' :
@@ -230,7 +232,7 @@ const chargeTarget = (charge, teams) => charge.team === 'all' ? 'Todos os estabe
 function bankCharges(charges, manager = false) {
   if (!charges?.length) return empty(manager ? 'Nenhuma cobrança lançada' : 'Nenhuma cobrança pendente',
     manager ? 'As cobranças lançadas pelo banco aparecem aqui.' : 'Taxas e outras cobranças do banco aparecem aqui.');
-  return '<div class="records charge-records">' + charges.map(charge => {
+  return '<div class="records">' + charges.map(charge => {
     const status = charge.paid_at ? 'Paga' : charge.cancelled_at ? 'Cancelada' : charge.amount === 0 ? 'Sem valor a pagar' : 'Pendente';
     const basis = charge.rate === null ? 'Valor fixo' : (charge.rate / 100).toLocaleString('pt-BR') + '% sobre o saldo no lançamento';
     const description = [manager ? charge.teamName : '', basis, date(charge.created)].filter(Boolean).join(' · ');
@@ -553,6 +555,58 @@ async function refundDialog(id) {
     'Confirmar devolução', 'danger'));
   paymentAction('/activity/' + id + '/refund', {}, 'Valor devolvido');
 }
+const dreAdjustments = [
+  ['salesTaxes', 'Tributos sobre vendas'], ['costs', 'Custo das mercadorias vendidas'],
+  ['expenses', 'Outras despesas operacionais'], ['incomeTaxes', 'Tributos sobre o lucro']
+];
+function drePage() {
+  const introHtml = intro('RELATÓRIOS', 'DRE', 'Demonstração do Resultado do Exercício por estabelecimento.', button('Gerar DRE', 'dre-generate', 'history'));
+  const report = state.dre;
+  if (!report) return introHtml + section('Resultado do período', '', empty('Selecione um estabelecimento e o período', 'A DRE será exibida aqui.'));
+  const day = value => value.split('-').reverse().join('/');
+  const rows = [
+    ['Receita bruta de vendas', report.sales],
+    ['Devoluções e estornos de vendas', -report.refunds],
+    ['Tributos sobre vendas', -report.salesTaxes],
+    ['Receita líquida', report.netRevenue, 'subtotal'],
+    ['Custo das mercadorias vendidas', -report.costs],
+    ['Resultado bruto', report.grossResult, 'subtotal'],
+    ['Taxas de maquininha líquidas de devoluções', -report.terminalFees],
+    ['Cobranças do banco pagas', -report.bankCharges],
+    ['Outras despesas operacionais', -report.expenses],
+    ['Resultado antes dos tributos sobre o lucro', report.beforeIncomeTaxes, 'subtotal'],
+    ['Tributos sobre o lucro', -report.incomeTaxes],
+    ['Resultado líquido simulado', report.netResult, 'net']
+  ];
+  return introHtml + section(report.account.name, 'CNPJ ' + report.account.cnpj + ' · ' + day(report.start) + ' a ' + day(report.end),
+    '<table class="dre-table" aria-label="Demonstração do Resultado do Exercício"><thead><tr><th scope="col">Conta</th><th scope="col">Valor</th></tr></thead><tbody>' +
+    rows.map(([label, value, style = '']) => '<tr class="' + style + '"><th scope="row">' + label + '</th><td>' + money(value || 0) + '</td></tr>').join('') +
+    '</tbody></table><p class="dre-note">Simulação por regime de caixa. As vendas do sistema entram pela data do pagamento. Custos, despesas e tributos informados pelo gestor complementam o relatório.</p>');
+}
+function dreDialog(accounts) {
+  const teams = accounts.filter(account => account.role === 'team');
+  if (!teams.length) throw new Error('Cadastre um estabelecimento para gerar a DRE.');
+  const previous = state.dre;
+  const today = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10);
+  showDialog('Gerar DRE', 'Escolha o estabelecimento e o período.', form(
+    select('Estabelecimento', 'team', teams, previous?.account.id || (teams.length === 1 ? teams[0].id : '')) +
+    '<div class="dre-dates">' + input('Data inicial', 'start', 'type="date" value="' + esc(previous?.start || today.slice(0, 8) + '01') + '"') +
+    input('Data final', 'end', 'type="date" value="' + esc(previous?.end || today) + '"') + '</div>' +
+    '<details class="dre-adjustments"><summary>Informar custos, despesas e tributos</summary>' +
+    '<p class="field-help">Informe apenas valores que ainda não estejam nas cobranças do banco. Campos vazios valem R$ 0,00.</p>' +
+    dreAdjustments.map(([key, label]) => input(label, key, 'inputmode="decimal" placeholder="0,00"', false)).join('') +
+    '</details>', 'Gerar DRE'));
+  onForm(async filters => {
+    const params = new URLSearchParams({ team: filters.team, start: filters.start, end: filters.end });
+    for (const [key] of dreAdjustments) if (filters[key].trim()) params.set(key, cents(filters[key]));
+    const report = await api('/admin/dre?' + params);
+    if (state.data?.user.role !== 'admin') return;
+    state.dre = report;
+    modal.close();
+    drawPage();
+  });
+}
+
 function chargeDialog(accounts, charge) {
   const teams = accounts.filter(account => account.role === 'team');
   showDialog(charge ? 'Editar cobrança' : 'Nova cobrança', 'A cobrança fica salva no painel até você lançá-la.', form(
@@ -688,6 +742,7 @@ document.addEventListener('click', async e => {
         events?.close();
         events = null;
         state.data = null;
+        state.dre = null;
         render();
         break;
       case 'student': {
@@ -869,6 +924,7 @@ document.addEventListener('click', async e => {
       case 'pix-keys': await keysDialog(pixAccount(id)); break;
       case 'receipt': await receiptDialog(id); break;
       case 'refund': await refundDialog(id); break;
+      case 'dre-generate': dreDialog(accounts); break;
       case 'terminal-fee':
         showDialog('Configurar taxa da maquininha', 'O banco recebe esse percentual de cada venda no cartão.', form(
           input('Taxa (%)', 'rate', 'inputmode="decimal" maxlength="6" value="' + percentText(state.data.terminalFeeRate) + '"') +

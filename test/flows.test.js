@@ -501,6 +501,37 @@ test('gestor salva, relança, edita e exclui cobranças sem alterar lançamentos
   assert.deepEqual((await charges()).map(charge => charge.amount), [10000]);
 });
 
+test('DRE é exclusiva do gestor e usa as vendas e despesas do estabelecimento no período', async t => {
+  const { admin, students: [seller, second, buyer], team, credit } = await setup({}, t, 1);
+  await admin('/admin/teams', { name: 'Outro comércio', cnpj: '00000000000333', members: [second.id] }, 201);
+  const [otherTeam] = (await second.request('/home')).teams;
+  await credit(buyer.id, 50000);
+  await credit(team.id, 900);
+  const salePath = '/teams/' + team.id + '/sales';
+  const first = await seller.request(salePath, { amount: 10000, method: 'pix' }, 201);
+  await buyer.request('/pix/' + first.id, {});
+  await seller.request('/activity/' + first.id + '/refund', {});
+  const secondSale = await seller.request(salePath, { amount: 20000, method: 'pix' }, 201);
+  await buyer.request('/pix/' + secondSale.id, {});
+  await buyer.request('/pix/transfer', { source: buyer.id, recipient: team.id, amount: 3000, request: randomBytes(16).toString('hex') });
+  const charge = { team: team.id, type: 'fixed', value: 4000, description: 'Aluguel', request: randomBytes(16).toString('hex') };
+  await admin('/bank/charges', charge, 201);
+  const [rent] = (await seller.request('/home')).teams[0].charges;
+  await seller.request('/bank/charges/' + rent.id + '/pay', {});
+  await admin('/bank/charges', { ...charge, request: randomBytes(16).toString('hex') }, 201);
+
+  const period = '&start=2000-01-01&end=2099-12-31';
+  const reportPath = '/admin/dre?team=' + team.id + period;
+  await seller.request(reportPath, undefined, 403);
+  await admin('/admin/dre?team=' + team.id + '&start=2026-02-30&end=2026-03-01', undefined, 400);
+  const dre = await admin(reportPath + '&salesTaxes=1000&costs=3000&expenses=200&incomeTaxes=150');
+  assert.equal(dre.account.id, team.id);
+  assert.deepEqual([dre.sales, dre.refunds, dre.bankCharges, dre.netRevenue, dre.grossResult, dre.beforeIncomeTaxes, dre.netResult],
+    [30000, 10000, 4000, 19000, 16000, 11800, 11650]);
+  assert.equal((await admin('/admin/dre?team=' + otherTeam.id + period)).sales, 0);
+  assert.equal((await admin('/admin/dre?team=' + team.id + '&start=1999-01-01&end=1999-12-31')).netResult, 0);
+});
+
 test('lançamentos para todos alcançam novos estabelecimentos e registram percentuais zerados', async t => {
   const { admin, students: [seller, second], team, credit } = await setup({}, t, 1);
   await admin('/admin/teams/' + team.id + '/delete', {});
@@ -698,6 +729,8 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   const [fee] = paidTeam.activity.filter(entry => entry.method === 'terminal_fee');
   assert.equal(paidTeam.activity.filter(entry => entry.method === 'terminal_fee').length, 1);
   assert.deepEqual([fee.payer, fee.payee, fee.amount], [team.id, bank.id, 100]);
+  const drePath = '/admin/dre?team=' + team.id + '&start=2000-01-01&end=2099-12-31';
+  assert.equal((await admin(drePath)).terminalFees, 100);
   assert.deepEqual(paidTeam.activity.filter(entry => entry.id === sale.id).map(entry => [entry.payee, entry.amount]), [[team.id, 1000]]);
   await admin('/bank/terminal-fee', { rate: 2000 });
 
@@ -720,6 +753,7 @@ test('MQTT com dispositivo simulado, vínculo de RFID, cartão duplicado e conve
   assert.equal((await buyer.request('/home')).user.balance, 2500);
   assert.equal((await seller.request('/home')).teams[0].balance, 4000);
   assert.equal((await admin('/home')).user.balance, 0);
+  assert.equal((await admin(drePath)).terminalFees, 0);
   const feeReceipt = await seller.request('/activity/' + fee.id);
   assert.ok(feeReceipt.refundId);
   assert.equal((await seller.request('/activity/' + feeReceipt.refundId)).amount, 100);

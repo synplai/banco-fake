@@ -7,6 +7,7 @@ import {
 } from './db.js';
 import { bridge, deviceOnlineSince } from './mqtt.js';
 import { keyCandidates, normalizeKey, registeredTypes } from './pix-keys.js';
+import { establishmentDre } from './dre.js';
 
 const web = fileURLToPath(new URL('../web/', import.meta.url));
 const scanner = fileURLToPath(new URL('../node_modules/jsqr/dist/jsQR.js', import.meta.url));
@@ -152,6 +153,11 @@ export async function createApp(db, config = process.env) {
   }
   const operation = (db, id) => get(db, 'SELECT * FROM operations WHERE id=?', id);
   const chargeFields = 'c.id,c.team,c.description,c.rate,c.amount,c.created,c.paid_at,c.cancelled_at,a.name AS "teamName"';
+
+  api.get('/admin/dre', async (req, res) => {
+    manager(req);
+    res.json(await establishmentDre(db, req.query));
+  });
 
   api.get('/home', async (req, res) => {
     await expire(db);
