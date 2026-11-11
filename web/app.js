@@ -189,7 +189,7 @@ function adminPage() {
       button('Maquininha', 'pair', 'device', 'ghost', x.id) +
       button('Editar', 'team', 'edit', 'ghost', x.id) + button('Excluir', 'delete-account', 'trash', 'danger-ghost', x.id))).join('') + '</div>' : empty('Nenhum estabelecimento cadastrado', 'Cadastre pelo menos um aluno para operar a conta.', 'shop'));
   if (state.page === 'charges') return intro('CONTA DO BANCO', 'Cobranças', 'Salve cobranças e envie aos estabelecimentos quando quiser.', button('Nova cobrança', 'charge-new', 'plus')) +
-    section('Cobranças salvas', 'Use Lançar cobrança a cada vez que quiser cobrar.', chargeTemplates.length ? '<div class="records">' +
+    section('Cobranças salvas', 'Use Lançar cobrança a cada vez que quiser cobrar.', chargeTemplates.length ? '<div class="records charge-records">' +
       chargeTemplates.map(charge => record(charge.description, chargeTarget(charge, teams), 'history',
         '<b>' + chargeValue(charge) + '</b>' + button('Lançar cobrança', 'charge-launch', 'arrow', 'primary', charge.id) +
         button('Editar', 'charge-edit', 'edit', 'ghost', charge.id) + button('Excluir', 'charge-template-delete', 'trash', 'danger-ghost', charge.id))).join('') + '</div>' :
@@ -230,11 +230,11 @@ const chargeTarget = (charge, teams) => charge.team === 'all' ? 'Todos os estabe
 function bankCharges(charges, manager = false) {
   if (!charges?.length) return empty(manager ? 'Nenhuma cobrança lançada' : 'Nenhuma cobrança pendente',
     manager ? 'As cobranças lançadas pelo banco aparecem aqui.' : 'Taxas e outras cobranças do banco aparecem aqui.');
-  return '<div class="records">' + charges.map(charge => {
-    const status = charge.paid_at ? 'Paga' : charge.cancelled_at ? 'Cancelada' : 'Pendente';
+  return '<div class="records charge-records">' + charges.map(charge => {
+    const status = charge.paid_at ? 'Paga' : charge.cancelled_at ? 'Cancelada' : charge.amount === 0 ? 'Sem valor a pagar' : 'Pendente';
     const basis = charge.rate === null ? 'Valor fixo' : (charge.rate / 100).toLocaleString('pt-BR') + '% sobre o saldo no lançamento';
     const description = [manager ? charge.teamName : '', basis, date(charge.created)].filter(Boolean).join(' · ');
-    const action = charge.paid_at ? button('Comprovante', 'receipt', null, 'ghost', charge.id) : charge.cancelled_at ? '' :
+    const action = charge.paid_at ? button('Comprovante', 'receipt', null, 'ghost', charge.id) : charge.cancelled_at || charge.amount === 0 ? '' :
       manager ? button('Cancelar', 'charge-cancel', null, 'danger-ghost', charge.id) :
         button('Pagar', 'charge-pay', 'pix', 'primary', charge.id);
     return record(charge.description, description, 'history', '<b>' + money(charge.amount) + '</b>' +
@@ -568,7 +568,7 @@ function chargeDialog(accounts, charge) {
     target.querySelector('[data-charge-label]').textContent = percent ? 'Percentual (%)' : 'Valor em reais';
     target.elements.value.placeholder = percent ? 'Ex. 5,00' : '25,00';
     target.querySelector('[data-charge-help]').textContent = percent
-      ? 'O valor é calculado sobre o saldo disponível no lançamento. Resultados de R$ 0,00 são ignorados.'
+      ? 'O valor é calculado quando o estabelecimento recebe a cobrança. Com saldo zero, a cobrança fica em R$ 0,00.'
       : 'O valor é aplicado integralmente a cada estabelecimento selecionado.';
   }
   target.elements.type.addEventListener('change', update);
@@ -885,7 +885,7 @@ document.addEventListener('click', async e => {
         const path = '/bank/charge-templates/' + id;
         if (action === 'charge-template-delete') {
           showDialog('Excluir cobrança salva', charge.description,
-            form('<p>Os lançamentos já enviados continuam disponíveis em Cobranças emitidas.</p>', 'Excluir cobrança salva', 'danger'));
+            form('<p>Os lançamentos já enviados continuam disponíveis. A cobrança deixa de ser enviada a novos estabelecimentos.</p>', 'Excluir cobrança salva', 'danger'));
           onForm(() => complete(path + '/delete', {}, 'Cobrança salva excluída.'));
           break;
         }
@@ -894,7 +894,8 @@ document.addEventListener('click', async e => {
           b.dataset.request ||= requestId();
           const { count } = await api(path + '/launch', { request: b.dataset.request });
           delete b.dataset.request;
-          notice(count === 1 ? 'Cobrança lançada.' : count + ' cobranças lançadas.');
+          notice(count === 0 ? 'A cobrança será enviada aos novos estabelecimentos.' :
+            count === 1 ? 'Cobrança lançada.' : count + ' cobranças lançadas.');
           await refresh(true);
         } finally { b.disabled = false; }
         break;

@@ -501,6 +501,38 @@ test('gestor salva, relança, edita e exclui cobranças sem alterar lançamentos
   assert.deepEqual((await charges()).map(charge => charge.amount), [10000]);
 });
 
+test('lançamentos para todos alcançam novos estabelecimentos e registram percentuais zerados', async t => {
+  const { admin, students: [seller, second], team, credit } = await setup({}, t, 1);
+  await admin('/admin/teams/' + team.id + '/delete', {});
+  const fixed = { team: 'all', type: 'fixed', value: 6000, description: 'IPTU' };
+  const { id } = await admin('/bank/charge-templates', fixed, 201);
+  const request = { request: randomBytes(16).toString('hex') };
+  const launch = '/bank/charge-templates/' + id + '/launch';
+  assert.equal((await admin(launch, request, 201)).count, 0);
+  await admin('/admin/teams', { name: 'Primeiro comércio', cnpj: '00000000000211', members: [seller.id] }, 201);
+  const [firstTeam] = (await seller.request('/home')).teams;
+  assert.deepEqual(firstTeam.charges.map(charge => charge.amount), [6000]);
+  assert.equal((await admin(launch, request, 201)).count, 0);
+  await admin('/bank/charge-templates/' + id + '/edit', { ...fixed, value: 9000 });
+
+  const percent = { team: 'all', type: 'percent', value: 4000, description: 'Receita Federal' };
+  const { id: tax } = await admin('/bank/charge-templates', percent, 201);
+  assert.equal((await admin('/bank/charge-templates/' + tax + '/launch', { request: randomBytes(16).toString('hex') }, 201)).count, 1);
+  const firstCharges = (await seller.request('/home')).teams[0].charges;
+  const zero = firstCharges.find(charge => charge.description === percent.description);
+  assert.equal(zero.amount, 0);
+  await seller.request('/bank/charges/' + zero.id + '/pay', {});
+  assert.deepEqual((await seller.request('/home')).teams[0].activity, []);
+  await admin('/bank/charges', { ...fixed, team: firstTeam.id, description: 'Cobrança individual', request: randomBytes(16).toString('hex') }, 201);
+
+  await admin('/admin/teams', { name: 'Segundo comércio', cnpj: '00000000000222', members: [second.id] }, 201);
+  const [late] = (await second.request('/home')).teams;
+  assert.deepEqual(late.charges.map(charge => [charge.description, charge.amount]), [['IPTU', 6000], ['Receita Federal', 0]]);
+  await credit(late.id, 5000);
+  assert.equal((await second.request('/home')).teams[0].charges.find(charge => charge.description === percent.description).amount, 0);
+  assert.equal((await admin('/home')).user.balance, 0);
+});
+
 test('maquininhas online são descobertas e vinculadas sem nome nem chave', async t => {
   const broker = Aedes();
   const listener = createServer(broker.handle).listen(0, '127.0.0.1');

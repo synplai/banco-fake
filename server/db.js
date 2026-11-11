@@ -24,6 +24,21 @@ export function requireRule(condition, message, status) {
   if (!condition) throw new Rule(message, status);
 }
 
+const bankChargeTable = `CREATE TABLE IF NOT EXISTS bank_charges (
+      id TEXT PRIMARY KEY, request TEXT NOT NULL, scope TEXT NOT NULL,
+      issuer TEXT NOT NULL REFERENCES accounts(id), team TEXT NOT NULL REFERENCES accounts(id),
+      description TEXT NOT NULL, rate INTEGER, amount BIGINT NOT NULL CHECK(amount >= 0),
+      created BIGINT NOT NULL, paid_at BIGINT, cancelled_at BIGINT, deleted_at BIGINT,
+      template_id TEXT REFERENCES bank_charge_templates(id), UNIQUE(request,team)
+    );`;
+const chargeTeamIndex = 'CREATE INDEX IF NOT EXISTS bank_charges_team ON bank_charges(team,created);';
+const backfillChargeLaunches = `INSERT INTO bank_charge_launches
+    (issuer,request,scope,description,type,value,created,template_id,recipient_count)
+    SELECT issuer,request,scope,description,CASE WHEN rate IS NULL THEN 'fixed' ELSE 'percent' END,
+      COALESCE(rate,MIN(amount)),MIN(created),template_id,COUNT(*) FROM bank_charges
+    GROUP BY issuer,request,scope,description,rate,template_id
+    ON CONFLICT(issuer,request) DO NOTHING;`;
+
 const schema = `
     CREATE TABLE IF NOT EXISTS accounts (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','student','team')),
@@ -83,14 +98,14 @@ const schema = `
       id TEXT PRIMARY KEY, issuer TEXT NOT NULL REFERENCES accounts(id), scope TEXT NOT NULL,
       description TEXT NOT NULL, type TEXT NOT NULL, value BIGINT NOT NULL, deleted_at BIGINT
     );
-    CREATE TABLE IF NOT EXISTS bank_charges (
-      id TEXT PRIMARY KEY, request TEXT NOT NULL, scope TEXT NOT NULL,
-      issuer TEXT NOT NULL REFERENCES accounts(id), team TEXT NOT NULL REFERENCES accounts(id),
-      description TEXT NOT NULL, rate INTEGER, amount BIGINT NOT NULL CHECK(amount > 0),
-      created BIGINT NOT NULL, paid_at BIGINT, cancelled_at BIGINT, deleted_at BIGINT,
-      template_id TEXT REFERENCES bank_charge_templates(id), UNIQUE(request,team)
+    CREATE TABLE IF NOT EXISTS bank_charge_launches (
+      issuer TEXT NOT NULL REFERENCES accounts(id), request TEXT NOT NULL, scope TEXT NOT NULL,
+      description TEXT NOT NULL, type TEXT NOT NULL, value BIGINT NOT NULL, created BIGINT NOT NULL,
+      template_id TEXT REFERENCES bank_charge_templates(id), recipient_count INTEGER NOT NULL,
+      PRIMARY KEY(issuer,request)
     );
-    CREATE INDEX IF NOT EXISTS bank_charges_team ON bank_charges(team,created);
+    ${bankChargeTable}
+    ${chargeTeamIndex}
     CREATE TABLE IF NOT EXISTS pix_keys (
       id TEXT PRIMARY KEY, account TEXT NOT NULL REFERENCES accounts(id), type TEXT NOT NULL,
       value TEXT NOT NULL, UNIQUE(type,value)
@@ -133,6 +148,16 @@ export async function openDb(file, connectionString) {
     const chargeColumns = sqlite.prepare('PRAGMA table_info(bank_charges)').all().map(column => column.name);
     if (!chargeColumns.includes('deleted_at')) exec('ALTER TABLE bank_charges ADD COLUMN deleted_at BIGINT');
     if (!chargeColumns.includes('template_id')) exec('ALTER TABLE bank_charges ADD COLUMN template_id TEXT REFERENCES bank_charge_templates(id)');
+    const chargeSql = sqlite.prepare("SELECT sql FROM sqlite_master WHERE name='bank_charges'").get().sql;
+    if (/amount\s*>\s*0/i.test(chargeSql)) {
+      exec('ALTER TABLE bank_charges RENAME TO bank_charges_old');
+      exec(bankChargeTable);
+      exec(`INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created,paid_at,cancelled_at,deleted_at,template_id)
+        SELECT id,request,scope,issuer,team,description,rate,amount,created,paid_at,cancelled_at,deleted_at,template_id FROM bank_charges_old`);
+      exec('DROP TABLE bank_charges_old');
+      exec(chargeTeamIndex);
+    }
+    exec(backfillChargeLaunches);
   });
   const connection = {
     get: (sql, args) => sqlite.prepare(sql).get(...args),
@@ -189,13 +214,19 @@ async function openPostgres(connectionString) {
     }
   }
   try {
-    await postgresTransaction(async (_, exec) => {
+    await postgresTransaction(async (db, exec) => {
       await exec(schema);
       await exec('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
       await exec('ALTER TABLE operations ADD COLUMN IF NOT EXISTS actor TEXT REFERENCES accounts(id)');
       await exec('ALTER TABLE ledger ADD COLUMN IF NOT EXISTS archived_at BIGINT');
       await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
       await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS template_id TEXT REFERENCES bank_charge_templates(id)');
+      const amountConstraint = await get(db, `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conrelid='bank_charges'::regclass AND conname='bank_charges_amount_check'`);
+      if (/amount\s*>\s*0/i.test(amountConstraint?.definition || '')) {
+        await exec('ALTER TABLE bank_charges DROP CONSTRAINT bank_charges_amount_check, ADD CONSTRAINT bank_charges_amount_check CHECK(amount >= 0)');
+      }
+      await exec(backfillChargeLaunches);
     });
   } catch (error) {
     await pool.end();

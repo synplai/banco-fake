@@ -165,7 +165,7 @@ export async function createApp(db, config = process.env) {
           WHERE actor=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1`, user.id) || null,
         chargeTemplates: await all(db, `SELECT id,scope AS team,description,type,value FROM bank_charge_templates
           WHERE issuer=? AND deleted_at IS NULL ORDER BY description,id`, user.id),
-        charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.deleted_at IS NULL ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
+        charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.deleted_at IS NULL ORDER BY (c.amount>0 AND c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
         activity: await all(db,
         `SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName"
          FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee
@@ -176,7 +176,7 @@ export async function createApp(db, config = process.env) {
       team.activity = await activity(db, team.id);
       team.device = (await devices('WHERE d.team=?', team.id))[0] || null;
       team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
-      team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL AND c.deleted_at IS NULL ORDER BY c.created DESC', team.id);
+      team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL AND c.deleted_at IS NULL ORDER BY (c.amount>0) DESC,c.created DESC', team.id);
     }
     res.json({ user, teams, activity: await activity(db, user.id), devices: await devices(), availableDevices: teams.length ? await availableDevices() : [],
       card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
@@ -230,6 +230,7 @@ export async function createApp(db, config = process.env) {
         await run(db, 'DELETE FROM members WHERE team=?', team);
       } else {
         await run(db, "INSERT INTO accounts (id,name,role,cnpj) VALUES (?,?,'team',?)", team, name, cnpj);
+        await applyGlobalCharges(db, team);
       }
       for (const member of members) await run(db, 'INSERT INTO members VALUES (?,?)', team, member);
     });
@@ -351,24 +352,33 @@ export async function createApp(db, config = process.env) {
     return { team, type, value, description };
   }
   const validChargeRequest = request => check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
-  const previousCharges = (db, request, issuer) => all(db,
-    'SELECT scope,description,rate,amount,template_id FROM bank_charges WHERE request=? AND issuer=?', request, issuer);
+  const previousLaunch = (db, request, issuer) => get(db,
+    'SELECT scope,description,type,value,template_id,recipient_count FROM bank_charge_launches WHERE request=? AND issuer=?', request, issuer);
+  async function addChargeRecipient(db, launch, { id, balance }) {
+    const rate = launch.type === 'percent' ? launch.value : null;
+    const cents = rate === null ? launch.value : Math.round(balance * rate / 10000);
+    await run(db, `INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created,template_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`, uid(), launch.request, launch.scope, launch.issuer, id, launch.description,
+    rate, cents, launch.created, launch.template_id);
+  }
+  async function applyGlobalCharges(db, team) {
+    const launches = await all(db, `SELECT l.* FROM bank_charge_launches l
+      LEFT JOIN bank_charge_templates t ON t.id=l.template_id
+      WHERE l.scope='all' AND t.deleted_at IS NULL AND
+        (NOT EXISTS (SELECT 1 FROM bank_charges c WHERE c.request=l.request AND c.issuer=l.issuer) OR
+         EXISTS (SELECT 1 FROM bank_charges c WHERE c.request=l.request AND c.issuer=l.issuer
+          AND c.deleted_at IS NULL AND c.cancelled_at IS NULL))`);
+    for (const launch of launches) await addChargeRecipient(db, launch, { id: team, balance: 0 });
+  }
   async function issueCharges(db, { team, type, value, description }, issuer, request, templateId = null) {
     const active = "SELECT id,balance FROM accounts WHERE role='team' AND deleted_at IS NULL";
     const targets = team === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', team);
-    check(targets.length, 'Nenhum estabelecimento ativo selecionado.', 404);
-    const rate = type === 'percent' ? value : null;
-    let count = 0;
-    const created = Date.now();
-    for (const target of targets) {
-      const cents = rate === null ? value : Math.round(target.balance * rate / 10000);
-      if (!cents) continue;
-      await run(db, `INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created,template_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`, uid(), request, team, issuer, target.id, description, rate, cents, created, templateId);
-      count++;
-    }
-    check(count, 'O percentual resultou em R$ 0,00. Escolha um valor fixo ou um percentual maior.');
-    return count;
+    check(team === 'all' || targets.length, 'Nenhum estabelecimento ativo selecionado.', 404);
+    const launch = { issuer, request, scope: team, description, type, value, created: Date.now(), template_id: templateId };
+    await run(db, `INSERT INTO bank_charge_launches (issuer,request,scope,description,type,value,created,template_id,recipient_count)
+      VALUES (?,?,?,?,?,?,?,?,?)`, issuer, request, team, description, type, value, launch.created, templateId, targets.length);
+    for (const target of targets) await addChargeRecipient(db, launch, target);
+    return targets.length;
   }
   api.post('/bank/charges', async (req, res) => {
     manager(req);
@@ -376,14 +386,12 @@ export async function createApp(db, config = process.env) {
     const { request } = req.body;
     validChargeRequest(request);
     const count = await transaction(db, async db => {
-      const previous = await previousCharges(db, request, req.user.id);
-      if (previous.length) {
-        const saved = previous[0];
-        const rate = charge.type === 'percent' ? charge.value : null;
+      const saved = await previousLaunch(db, request, req.user.id);
+      if (saved) {
         check(saved.template_id === null && saved.scope === charge.team && saved.description === charge.description &&
-          saved.rate === rate && (rate !== null || saved.amount === charge.value),
+          saved.type === charge.type && saved.value === charge.value,
           'Este lançamento já foi confirmado com outros dados.', 409);
-        return previous.length;
+        return saved.recipient_count;
       }
       return issueCharges(db, charge, req.user.id, request);
     });
@@ -414,10 +422,10 @@ export async function createApp(db, config = process.env) {
     const { id } = req.params;
     validChargeRequest(request);
     const count = await transaction(db, async db => {
-      const previous = await previousCharges(db, request, req.user.id);
-      if (previous.length) {
-        check(previous[0].template_id === id, 'Este lançamento já foi confirmado com outros dados.', 409);
-        return previous.length;
+      const saved = await previousLaunch(db, request, req.user.id);
+      if (saved) {
+        check(saved.template_id === id, 'Este lançamento já foi confirmado com outros dados.', 409);
+        return saved.recipient_count;
       }
       const template = await get(db, `SELECT scope AS team,description,type,value FROM bank_charge_templates
         WHERE id=? AND issuer=? AND deleted_at IS NULL`, id, req.user.id);
@@ -440,7 +448,7 @@ export async function createApp(db, config = process.env) {
       check(charge, 'Cobrança não encontrada.', 404);
       await teamAccess(db, req, charge.team);
       check(!charge.cancelled_at, 'Esta cobrança foi cancelada.', 409);
-      if (charge.paid_at) return;
+      if (charge.paid_at || charge.amount === 0) return;
       await transfer(db, { id, payer: charge.team, payee: charge.issuer, amount: charge.amount, method: 'fee', actor: req.user.id });
       await run(db, 'UPDATE bank_charges SET paid_at=? WHERE id=?', Date.now(), id);
     });
