@@ -460,6 +460,47 @@ test('crédito em todas as contas e cobranças fixas ou percentuais para CNPJ', 
   await second.request('/bank/charges/' + otherCharge.id + '/pay', {}, 409);
 });
 
+test('gestor salva, relança, edita e exclui cobranças sem alterar lançamentos anteriores', async t => {
+  const { admin, students: [seller], team, credit } = await setup({}, t, 1);
+  const definition = { team: team.id, type: 'fixed', value: 5000, description: 'Aluguel' };
+  await seller.request('/bank/charge-templates', definition, 403);
+  const { id } = await admin('/bank/charge-templates', definition, 201);
+  const template = '/bank/charge-templates/' + id;
+  const charges = async () => (await seller.request('/home')).teams[0].charges;
+  assert.deepEqual((await admin('/home')).chargeTemplates, [{ id, ...definition }]);
+  assert.deepEqual(await charges(), []);
+
+  const firstRequest = { request: randomBytes(16).toString('hex') };
+  await Promise.all([admin(template + '/launch', firstRequest, 201), admin(template + '/launch', firstRequest, 201)]);
+  const [first] = await charges();
+  assert.equal((await charges()).length, 1);
+  await admin(template + '/launch', { request: randomBytes(16).toString('hex') }, 201);
+  assert.deepEqual((await charges()).map(charge => charge.amount), [5000, 5000]);
+  const second = (await charges()).find(charge => charge.id !== first.id);
+  await admin(template + '/edit', { ...definition, value: 10000 });
+  await admin(template + '/launch', firstRequest, 201);
+  assert.deepEqual((await charges()).map(charge => charge.amount), [5000, 5000]);
+  await admin(template + '/launch', { request: randomBytes(16).toString('hex') }, 201);
+  assert.deepEqual((await charges()).map(charge => charge.amount).sort((a, b) => a - b), [5000, 5000, 10000]);
+
+  await credit(team.id, 5000);
+  const payment = '/bank/charges/' + first.id;
+  await seller.request(payment + '/pay', {});
+  await admin(payment + '/delete', {});
+  assert.equal((await admin('/activity/' + first.id)).amount, 5000);
+  assert.equal((await admin('/home')).user.balance, 5000);
+  const pending = '/bank/charges/' + second.id;
+  await seller.request(pending + '/delete', {}, 403);
+  await admin(pending + '/delete', {});
+  await seller.request(pending + '/pay', {}, 409);
+  await admin(template + '/delete', {});
+  await admin(template + '/launch', { request: randomBytes(16).toString('hex') }, 404);
+  const home = await admin('/home');
+  assert.deepEqual(home.chargeTemplates, []);
+  assert.deepEqual(home.charges.map(charge => charge.amount), [10000]);
+  assert.deepEqual((await charges()).map(charge => charge.amount), [10000]);
+});
+
 test('maquininhas online são descobertas e vinculadas sem nome nem chave', async t => {
   const broker = Aedes();
   const listener = createServer(broker.handle).listen(0, '127.0.0.1');

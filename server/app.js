@@ -163,7 +163,9 @@ export async function createApp(db, config = process.env) {
         terminalFeeRate: await terminalFeeRate(db),
         cardEnrollment: await get(db, `SELECT id,owner,status,detail FROM operations
           WHERE actor=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1`, user.id) || null,
-        charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
+        chargeTemplates: await all(db, `SELECT id,scope AS team,description,type,value FROM bank_charge_templates
+          WHERE issuer=? AND deleted_at IS NULL ORDER BY description,id`, user.id),
+        charges: await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.deleted_at IS NULL ORDER BY (c.paid_at IS NULL AND c.cancelled_at IS NULL) DESC,c.created DESC LIMIT 100'),
         activity: await all(db,
         `SELECT l.id,l.amount,l.method,l.created,p.name AS "fromName",r.name AS "toName"
          FROM ledger l LEFT JOIN accounts p ON p.id=l.payer JOIN accounts r ON r.id=l.payee
@@ -174,7 +176,7 @@ export async function createApp(db, config = process.env) {
       team.activity = await activity(db, team.id);
       team.device = (await devices('WHERE d.team=?', team.id))[0] || null;
       team.sale = await get(db, "SELECT * FROM operations WHERE owner=? AND kind='sale' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", team.id) || null;
-      team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL ORDER BY c.created DESC', team.id);
+      team.charges = await all(db, 'SELECT ' + chargeFields + ' FROM bank_charges c JOIN accounts a ON a.id=c.team WHERE c.team=? AND c.paid_at IS NULL AND c.cancelled_at IS NULL AND c.deleted_at IS NULL ORDER BY c.created DESC', team.id);
     }
     res.json({ user, teams, activity: await activity(db, user.id), devices: await devices(), availableDevices: teams.length ? await availableDevices() : [],
       card: await get(db, "SELECT * FROM operations WHERE owner=? AND kind='card' ORDER BY (status='pending') DESC,created DESC,id DESC LIMIT 1", user.id) || null });
@@ -338,41 +340,98 @@ export async function createApp(db, config = process.env) {
     await run(db, 'INSERT INTO terminal_fee_config (id,rate) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET rate=excluded.rate', rate);
     res.json({ ok: true });
   });
-  api.post('/bank/charges', async (req, res) => {
-    manager(req);
-    const { team, type, value, request } = req.body;
-    const description = normalize(req.body.description);
+  function chargeInput(body) {
+    const { team, type, value } = body;
+    const description = normalize(body.description);
     check(typeof team === 'string' && team.length && description.length >= 2 && description.length <= 80,
       'Informe o estabelecimento e o nome da cobrança.');
-    check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
     check(type === 'fixed' || type === 'percent', 'Escolha valor fixo ou percentual.');
-    const rate = type === 'percent' ? value : null;
     if (type === 'fixed') amount(value);
-    else check(Number.isInteger(rate) && rate > 0 && rate <= 10000, 'Informe um percentual entre 0,01% e 100%.');
+    else check(Number.isInteger(value) && value > 0 && value <= 10000, 'Informe um percentual entre 0,01% e 100%.');
+    return { team, type, value, description };
+  }
+  const validChargeRequest = request => check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
+  const previousCharges = (db, request, issuer) => all(db,
+    'SELECT scope,description,rate,amount,template_id FROM bank_charges WHERE request=? AND issuer=?', request, issuer);
+  async function issueCharges(db, { team, type, value, description }, issuer, request, templateId = null) {
+    const active = "SELECT id,balance FROM accounts WHERE role='team' AND deleted_at IS NULL";
+    const targets = team === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', team);
+    check(targets.length, 'Nenhum estabelecimento ativo selecionado.', 404);
+    const rate = type === 'percent' ? value : null;
+    let count = 0;
+    const created = Date.now();
+    for (const target of targets) {
+      const cents = rate === null ? value : Math.round(target.balance * rate / 10000);
+      if (!cents) continue;
+      await run(db, `INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created,template_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`, uid(), request, team, issuer, target.id, description, rate, cents, created, templateId);
+      count++;
+    }
+    check(count, 'O percentual resultou em R$ 0,00. Escolha um valor fixo ou um percentual maior.');
+    return count;
+  }
+  api.post('/bank/charges', async (req, res) => {
+    manager(req);
+    const charge = chargeInput(req.body);
+    const { request } = req.body;
+    validChargeRequest(request);
     const count = await transaction(db, async db => {
-      const previous = await all(db, 'SELECT scope,description,rate,amount FROM bank_charges WHERE request=? AND issuer=?', request, req.user.id);
+      const previous = await previousCharges(db, request, req.user.id);
       if (previous.length) {
         const saved = previous[0];
-        check(saved.scope === team && saved.description === description && saved.rate === rate && (rate !== null || saved.amount === value),
+        const rate = charge.type === 'percent' ? charge.value : null;
+        check(saved.template_id === null && saved.scope === charge.team && saved.description === charge.description &&
+          saved.rate === rate && (rate !== null || saved.amount === charge.value),
           'Este lançamento já foi confirmado com outros dados.', 409);
         return previous.length;
       }
-      const active = "SELECT id,balance FROM accounts WHERE role='team' AND deleted_at IS NULL";
-      const targets = team === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', team);
-      check(targets.length, 'Nenhum estabelecimento ativo selecionado.', 404);
-      let count = 0;
-      const created = Date.now();
-      for (const target of targets) {
-        const cents = rate === null ? value : Math.round(target.balance * rate / 10000);
-        if (!cents) continue;
-        await run(db, 'INSERT INTO bank_charges (id,request,scope,issuer,team,description,rate,amount,created) VALUES (?,?,?,?,?,?,?,?,?)',
-          uid(), request, team, req.user.id, target.id, description, rate, cents, created);
-        count++;
-      }
-      check(count, 'O percentual resultou em R$ 0,00. Escolha um valor fixo ou um percentual maior.');
-      return count;
+      return issueCharges(db, charge, req.user.id, request);
     });
     res.status(201).json({ ok: true, count });
+  });
+  api.post(['/bank/charge-templates', '/bank/charge-templates/:id/edit'], async (req, res) => {
+    manager(req);
+    const { team, type, value, description } = chargeInput(req.body);
+    const { id } = req.params;
+    const template = id || uid();
+    await transaction(db, async db => {
+      check(team === 'all' || await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='team' AND deleted_at IS NULL", team),
+        'Estabelecimento não encontrado.', 404);
+      if (id) {
+        const result = await run(db, `UPDATE bank_charge_templates SET scope=?,description=?,type=?,value=?
+          WHERE id=? AND issuer=? AND deleted_at IS NULL`, team, description, type, value, id, req.user.id);
+        check(result.changes, 'Cobrança salva não encontrada.', 404);
+      } else {
+        await run(db, 'INSERT INTO bank_charge_templates (id,issuer,scope,description,type,value) VALUES (?,?,?,?,?,?)',
+          template, req.user.id, team, description, type, value);
+      }
+    });
+    res.status(id ? 200 : 201).json({ ok: true, id: template });
+  });
+  api.post('/bank/charge-templates/:id/launch', async (req, res) => {
+    manager(req);
+    const { request } = req.body;
+    const { id } = req.params;
+    validChargeRequest(request);
+    const count = await transaction(db, async db => {
+      const previous = await previousCharges(db, request, req.user.id);
+      if (previous.length) {
+        check(previous[0].template_id === id, 'Este lançamento já foi confirmado com outros dados.', 409);
+        return previous.length;
+      }
+      const template = await get(db, `SELECT scope AS team,description,type,value FROM bank_charge_templates
+        WHERE id=? AND issuer=? AND deleted_at IS NULL`, id, req.user.id);
+      check(template, 'Cobrança salva não encontrada.', 404);
+      return issueCharges(db, template, req.user.id, request, id);
+    });
+    res.status(201).json({ ok: true, count });
+  });
+  api.post('/bank/charge-templates/:id/delete', async (req, res) => {
+    manager(req);
+    const result = await run(db, 'UPDATE bank_charge_templates SET deleted_at=? WHERE id=? AND issuer=? AND deleted_at IS NULL',
+      Date.now(), req.params.id, req.user.id);
+    check(result.changes, 'Cobrança salva não encontrada.', 404);
+    res.json({ ok: true });
   });
   api.post('/bank/charges/:id/pay', async (req, res) => {
     const id = req.params.id;
@@ -392,6 +451,15 @@ export async function createApp(db, config = process.env) {
     const result = await run(db, 'UPDATE bank_charges SET cancelled_at=? WHERE id=? AND issuer=? AND paid_at IS NULL AND cancelled_at IS NULL',
       Date.now(), req.params.id, req.user.id);
     check(result.changes, 'Esta cobrança já foi encerrada.', 409);
+    res.json({ ok: true });
+  });
+  api.post('/bank/charges/:id/delete', async (req, res) => {
+    manager(req);
+    const now = Date.now();
+    const result = await run(db, `UPDATE bank_charges SET deleted_at=?,
+      cancelled_at=CASE WHEN paid_at IS NULL THEN COALESCE(cancelled_at,?) ELSE cancelled_at END
+      WHERE id=? AND issuer=? AND deleted_at IS NULL`, now, now, req.params.id, req.user.id);
+    check(result.changes, 'Cobrança emitida não encontrada.', 404);
     res.json({ ok: true });
   });
   api.post('/admin/devices', async (req, res) => {

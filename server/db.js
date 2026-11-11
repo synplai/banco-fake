@@ -79,11 +79,16 @@ const schema = `
     CREATE TABLE IF NOT EXISTS credit_batches (
       request TEXT PRIMARY KEY, amount BIGINT NOT NULL, recipients INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS bank_charge_templates (
+      id TEXT PRIMARY KEY, issuer TEXT NOT NULL REFERENCES accounts(id), scope TEXT NOT NULL,
+      description TEXT NOT NULL, type TEXT NOT NULL, value BIGINT NOT NULL, deleted_at BIGINT
+    );
     CREATE TABLE IF NOT EXISTS bank_charges (
       id TEXT PRIMARY KEY, request TEXT NOT NULL, scope TEXT NOT NULL,
       issuer TEXT NOT NULL REFERENCES accounts(id), team TEXT NOT NULL REFERENCES accounts(id),
       description TEXT NOT NULL, rate INTEGER, amount BIGINT NOT NULL CHECK(amount > 0),
-      created BIGINT NOT NULL, paid_at BIGINT, cancelled_at BIGINT, UNIQUE(request,team)
+      created BIGINT NOT NULL, paid_at BIGINT, cancelled_at BIGINT, deleted_at BIGINT,
+      template_id TEXT REFERENCES bank_charge_templates(id), UNIQUE(request,team)
     );
     CREATE INDEX IF NOT EXISTS bank_charges_team ON bank_charges(team,created);
     CREATE TABLE IF NOT EXISTS pix_keys (
@@ -125,6 +130,9 @@ export async function openDb(file, connectionString) {
     if (!sqlite.prepare('PRAGMA table_info(ledger)').all().some(column => column.name === 'archived_at')) {
       exec('ALTER TABLE ledger ADD COLUMN archived_at BIGINT');
     }
+    const chargeColumns = sqlite.prepare('PRAGMA table_info(bank_charges)').all().map(column => column.name);
+    if (!chargeColumns.includes('deleted_at')) exec('ALTER TABLE bank_charges ADD COLUMN deleted_at BIGINT');
+    if (!chargeColumns.includes('template_id')) exec('ALTER TABLE bank_charges ADD COLUMN template_id TEXT REFERENCES bank_charge_templates(id)');
   });
   const connection = {
     get: (sql, args) => sqlite.prepare(sql).get(...args),
@@ -186,6 +194,8 @@ async function openPostgres(connectionString) {
       await exec('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
       await exec('ALTER TABLE operations ADD COLUMN IF NOT EXISTS actor TEXT REFERENCES accounts(id)');
       await exec('ALTER TABLE ledger ADD COLUMN IF NOT EXISTS archived_at BIGINT');
+      await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
+      await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS template_id TEXT REFERENCES bank_charge_templates(id)');
     });
   } catch (error) {
     await pool.end();
