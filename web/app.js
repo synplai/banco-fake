@@ -196,7 +196,8 @@ function adminPage() {
         '<b>' + chargeValue(charge) + '</b>' + button('Lançar cobrança', 'charge-launch', 'arrow', 'primary', charge.id) +
         button('Editar', 'charge-edit', 'edit', 'ghost', charge.id) + button('Excluir', 'charge-template-delete', 'trash', 'danger-ghost', charge.id))).join('') + '</div>' :
       empty('Nenhuma cobrança salva', 'Crie uma cobrança para reutilizá-la quando quiser.')) +
-    section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true));
+    section('Cobranças emitidas', 'Acompanhe os valores pendentes, pagos e cancelados.', bankCharges(charges, true),
+      button('Zerar cobranças emitidas', 'charge-reset', 'trash', 'danger-ghost'));
   return intro('CARTÃO E CONECTIVIDADE', 'Maquininhas', 'Gerencie os terminais e seus vínculos.', button('Registrar pelo ID', 'device', 'plus')) +
     section('Taxa da maquininha', percentText(terminalFeeRate) + '% por venda no cartão', '', button('Configurar taxa', 'terminal-fee', 'edit', 'ghost')) +
     section('Disponíveis para vincular', 'Maquininhas online e sem vínculo.', availableDevices.length ? '<div class="records">' +
@@ -957,6 +958,12 @@ document.addEventListener('click', async e => {
         break;
       }
       case 'charge-pay': payChargeDialog(id, teams); break;
+      case 'charge-reset':
+        showDialog('Zerar cobranças emitidas', 'A lista será limpa e as cobranças em aberto serão canceladas, inclusive para novos estabelecimentos.',
+          form('<p>Você poderá lançar novamente as cobranças salvas. Os pagamentos e comprovantes continuam no extrato.</p>',
+            'Zerar cobranças emitidas', 'danger'));
+        onForm(() => complete('/bank/charges/reset', {}, 'Cobranças emitidas zeradas.'));
+        break;
       case 'charge-delete': {
         const charge = state.data.charges.find(item => item.id === id);
         if (!charge) break;

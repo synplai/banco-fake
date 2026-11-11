@@ -101,7 +101,7 @@ const schema = `
     CREATE TABLE IF NOT EXISTS bank_charge_launches (
       issuer TEXT NOT NULL REFERENCES accounts(id), request TEXT NOT NULL, scope TEXT NOT NULL,
       description TEXT NOT NULL, type TEXT NOT NULL, value BIGINT NOT NULL, created BIGINT NOT NULL,
-      template_id TEXT REFERENCES bank_charge_templates(id), recipient_count INTEGER NOT NULL,
+      template_id TEXT REFERENCES bank_charge_templates(id), recipient_count INTEGER NOT NULL, closed_at BIGINT,
       PRIMARY KEY(issuer,request)
     );
     ${bankChargeTable}
@@ -144,6 +144,9 @@ export async function openDb(file, connectionString) {
     }
     if (!sqlite.prepare('PRAGMA table_info(ledger)').all().some(column => column.name === 'archived_at')) {
       exec('ALTER TABLE ledger ADD COLUMN archived_at BIGINT');
+    }
+    if (!sqlite.prepare('PRAGMA table_info(bank_charge_launches)').all().some(column => column.name === 'closed_at')) {
+      exec('ALTER TABLE bank_charge_launches ADD COLUMN closed_at BIGINT');
     }
     const chargeColumns = sqlite.prepare('PRAGMA table_info(bank_charges)').all().map(column => column.name);
     if (!chargeColumns.includes('deleted_at')) exec('ALTER TABLE bank_charges ADD COLUMN deleted_at BIGINT');
@@ -221,6 +224,7 @@ async function openPostgres(connectionString) {
       await exec('ALTER TABLE ledger ADD COLUMN IF NOT EXISTS archived_at BIGINT');
       await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS deleted_at BIGINT');
       await exec('ALTER TABLE bank_charges ADD COLUMN IF NOT EXISTS template_id TEXT REFERENCES bank_charge_templates(id)');
+      await exec('ALTER TABLE bank_charge_launches ADD COLUMN IF NOT EXISTS closed_at BIGINT');
       const amountConstraint = await get(db, `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
         WHERE conrelid='bank_charges'::regclass AND conname='bank_charges_amount_check'`);
       if (/amount\s*>\s*0/i.test(amountConstraint?.definition || '')) {

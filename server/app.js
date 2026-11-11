@@ -370,7 +370,7 @@ export async function createApp(db, config = process.env) {
   async function applyGlobalCharges(db, team) {
     const launches = await all(db, `SELECT l.* FROM bank_charge_launches l
       LEFT JOIN bank_charge_templates t ON t.id=l.template_id
-      WHERE l.scope='all' AND t.deleted_at IS NULL AND
+      WHERE l.scope='all' AND l.closed_at IS NULL AND t.deleted_at IS NULL AND
         (NOT EXISTS (SELECT 1 FROM bank_charges c WHERE c.request=l.request AND c.issuer=l.issuer) OR
          EXISTS (SELECT 1 FROM bank_charges c WHERE c.request=l.request AND c.issuer=l.issuer
           AND c.deleted_at IS NULL AND c.cancelled_at IS NULL))`);
@@ -467,12 +467,25 @@ export async function createApp(db, config = process.env) {
     check(result.changes, 'Esta cobrança já foi encerrada.', 409);
     res.json({ ok: true });
   });
+  function archiveIssuedCharges(db, issuer, now, id) {
+    return run(db, `UPDATE bank_charges SET deleted_at=?,
+      cancelled_at=CASE WHEN paid_at IS NULL THEN COALESCE(cancelled_at,?) ELSE cancelled_at END
+      WHERE issuer=? AND deleted_at IS NULL${id === undefined ? '' : ' AND id=?'}`,
+    now, now, issuer, ...(id === undefined ? [] : [id]));
+  }
+  api.post('/bank/charges/reset', async (req, res) => {
+    manager(req);
+    const count = await transaction(db, async db => {
+      const now = Date.now();
+      await run(db, 'UPDATE bank_charge_launches SET closed_at=? WHERE issuer=? AND closed_at IS NULL', now, req.user.id);
+      const { changes } = await archiveIssuedCharges(db, req.user.id, now);
+      return Number(changes);
+    });
+    res.json({ ok: true, count });
+  });
   api.post('/bank/charges/:id/delete', async (req, res) => {
     manager(req);
-    const now = Date.now();
-    const result = await run(db, `UPDATE bank_charges SET deleted_at=?,
-      cancelled_at=CASE WHEN paid_at IS NULL THEN COALESCE(cancelled_at,?) ELSE cancelled_at END
-      WHERE id=? AND issuer=? AND deleted_at IS NULL`, now, now, req.params.id, req.user.id);
+    const result = await archiveIssuedCharges(db, req.user.id, Date.now(), req.params.id);
     check(result.changes, 'Cobrança emitida não encontrada.', 404);
     res.json({ ok: true });
   });

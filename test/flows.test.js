@@ -501,6 +501,36 @@ test('gestor salva, relança, edita e exclui cobranças sem alterar lançamentos
   assert.deepEqual((await charges()).map(charge => charge.amount), [10000]);
 });
 
+test('gestor zera cobranças emitidas e encerra lançamentos para novos CNPJs', async t => {
+  const { admin, students: [seller, second], team, credit } = await setup({}, t, 1);
+  const { id } = await admin('/bank/charge-templates', { team: 'all', type: 'fixed', value: 500, description: 'Aluguel' }, 201);
+  const launch = '/bank/charge-templates/' + id + '/launch';
+  const request = () => ({ request: randomBytes(16).toString('hex') });
+  await admin(launch, request(), 201);
+  const [paid] = (await seller.request('/home')).teams[0].charges;
+  await credit(team.id, 500);
+  await seller.request('/bank/charges/' + paid.id + '/pay', {});
+  await admin(launch, request(), 201);
+  const [pending] = (await seller.request('/home')).teams[0].charges;
+  await seller.request('/bank/charges/reset', {}, 403);
+  assert.equal((await admin('/bank/charges/reset', {})).count, 2);
+  assert.deepEqual((await seller.request('/home')).teams[0].charges, []);
+  await seller.request('/bank/charges/' + pending.id + '/pay', {}, 409);
+  const home = await admin('/home');
+  assert.deepEqual(home.charges, []);
+  assert.equal(home.chargeTemplates[0].id, id);
+  assert.equal(home.user.balance, 500);
+  assert.equal((await admin('/activity/' + paid.id)).amount, 500);
+
+  await admin('/admin/teams/' + team.id + '/delete', {});
+  assert.equal((await admin(launch, request(), 201)).count, 0);
+  assert.equal((await admin('/bank/charges/reset', {})).count, 0);
+  await admin('/admin/teams', { name: 'Novo comércio', cnpj: '00000000000333', members: [second.id] }, 201);
+  assert.deepEqual((await second.request('/home')).teams[0].charges, []);
+  assert.equal((await admin(launch, request(), 201)).count, 1);
+  assert.equal((await second.request('/home')).teams[0].charges.length, 1);
+});
+
 test('DRE é exclusiva do gestor e usa as vendas e despesas do estabelecimento no período', async t => {
   const { admin, students: [seller, second, buyer], team, credit } = await setup({}, t, 1);
   await admin('/admin/teams', { name: 'Outro comércio', cnpj: '00000000000333', members: [second.id] }, 201);
