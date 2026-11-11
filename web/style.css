@@ -68,6 +68,7 @@ label { display: grid; gap: 6px; font-weight: 690; font-size: 14px; }
 input, select { min-height: 46px; border: 1px solid #dcd5e8; background: white; border-radius: 12px; padding: 10px 12px; color: var(--ink); width: 100%; min-width: 0; }
 input::placeholder { color: #817894; }
 .login-submit { min-height: 51px; justify-content: space-between; }
+.login-switch { display: grid; margin-top: 14px; }
 .login-note { display: flex; align-items: center; gap: 10px; color: var(--muted); padding-top: 24px; margin-top: 26px; border-top: 1px solid var(--line); font-size: 13px; }
 .form-error { color: #a52b4c; font-size: 13px; font-weight: 650; }
 .form-error:empty { display: none; }

@@ -25,6 +25,22 @@ function amount(value) {
   check(Number.isSafeInteger(value) && value > 0 && value <= moneyLimit, 'Informe um valor válido em reais.');
   return value;
 }
+function studentInput(body, editing = false) {
+  const name = normalize(body.name);
+  const username = normalize(body.username).toLowerCase();
+  const password = body.password ?? '';
+  check(name.length >= 2 && name.length <= 70 && login.test(username),
+    'Informe um nome e um usuário de 3 a 40 caracteres.');
+  check((editing && password === '') || (typeof password === 'string' && password.length >= 8 && password.length <= 128),
+    'A senha deve ter de 8 a 128 caracteres.');
+  return { name, username, password };
+}
+async function createStudent(db, { name, username, password }) {
+  check(!await get(db, 'SELECT 1 FROM accounts WHERE username=?', username), 'Este usuário já existe.', 409);
+  const id = uid();
+  await run(db, "INSERT INTO accounts (id,name,role,username,password) VALUES (?,?,'student',?,?)", id, name, username, passwordHash(password));
+  return id;
+}
 
 export async function createApp(db, config = process.env) {
   await initAdmin(db, config.ADMIN_USER, config.ADMIN_PASSWORD);
@@ -86,6 +102,20 @@ export async function createApp(db, config = process.env) {
     }
     next();
   });
+  async function createSession(db, req, account) {
+    const token = secret();
+    await run(db, 'DELETE FROM sessions WHERE expires<=? OR token=?', Date.now(), hash(sessionToken(req) || ''));
+    await run(db, 'INSERT INTO sessions VALUES (?,?,?)', hash(token), account, deadline(720));
+    return token;
+  }
+  api.post('/register', async (req, res) => {
+    const student = studentInput(req.body);
+    const token = await transaction(db, async db => {
+      const id = await createStudent(db, student);
+      return createSession(db, req, id);
+    });
+    res.cookie('feira', token, { ...cookie, maxAge: 12 * 3600000 }).status(201).json({ ok: true });
+  });
   api.post('/login', async (req, res) => {
     const username = normalize(req.body.username).toLowerCase();
     const password = req.body.password;
@@ -104,12 +134,10 @@ export async function createApp(db, config = process.env) {
       throw new Rule('Usuário ou senha inválidos.', 401);
     }
     attempts.delete(throttleKey);
-    const token = secret();
-    await transaction(db, async db => {
+    const token = await transaction(db, async db => {
       check(await get(db, 'SELECT 1 FROM accounts WHERE id=? AND username=? AND password=?',
         account.id, username, account.password), 'Usuário ou senha inválidos.', 401);
-      await run(db, 'DELETE FROM sessions WHERE expires<=? OR token=?', now, hash(sessionToken(req) || ''));
-      await run(db, 'INSERT INTO sessions VALUES (?,?,?)', hash(token), account.id, deadline(720));
+      return createSession(db, req, account.id);
     });
     res.cookie('feira', token, { ...cookie, maxAge: 12 * 3600000 }).json({ ok: true });
   });
@@ -191,23 +219,14 @@ export async function createApp(db, config = process.env) {
   api.post(['/admin/students', '/admin/students/:id/edit'], async (req, res) => {
     manager(req);
     const { id } = req.params;
-    const name = normalize(req.body.name);
-    const username = normalize(req.body.username).toLowerCase();
-    const password = req.body.password ?? '';
-    check(name.length >= 2 && name.length <= 70 && login.test(username),
-      'Informe um nome e um usuário de 3 a 40 caracteres.');
-    check((id && password === '') || (typeof password === 'string' && password.length >= 8 && password.length <= 128),
-      'A senha deve ter de 8 a 128 caracteres.');
+    const { name, username, password } = studentInput(req.body, Boolean(id));
     await transaction(db, async db => {
-      if (id) check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", id), 'Aluno não encontrado.', 404);
+      if (!id) return createStudent(db, { name, username, password });
+      check(await get(db, "SELECT 1 FROM accounts WHERE id=? AND role='student' AND deleted_at IS NULL", id), 'Aluno não encontrado.', 404);
       check(!await get(db, 'SELECT 1 FROM accounts WHERE username=? AND id<>?', username, id || ''), 'Este usuário já existe.', 409);
       const digest = password ? passwordHash(password) : null;
-      if (id) {
-        await run(db, 'UPDATE accounts SET name=?,username=?,password=COALESCE(?,password) WHERE id=?', name, username, digest, id);
-        if (digest) await run(db, 'DELETE FROM sessions WHERE account=?', id);
-      } else {
-        await run(db, "INSERT INTO accounts (id,name,role,username,password) VALUES (?,?,'student',?,?)", uid(), name, username, digest);
-      }
+      await run(db, 'UPDATE accounts SET name=?,username=?,password=COALESCE(?,password) WHERE id=?', name, username, digest, id);
+      if (digest) await run(db, 'DELETE FROM sessions WHERE account=?', id);
     });
     res.status(id ? 200 : 201).json({ ok: true });
   });

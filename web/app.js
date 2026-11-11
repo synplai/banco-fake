@@ -1,7 +1,7 @@
 const app = document.querySelector('#app');
 const modal = document.querySelector('#dialog');
 const toast = document.querySelector('#toast');
-const state = { data: null, page: 'overview', balance: true, running: false, loginError: '', dre: null };
+const state = { data: null, page: 'overview', balance: true, running: false, authPage: 'login', dre: null };
 let timer, camera, scanFrame, events, generation = 0, refreshQueued = false;
 const paths = {
   home: '<path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 21v-7h6v7"/>',
@@ -78,7 +78,7 @@ async function refresh(force = false) {
       events = null;
       state.data = null;
       state.dre = null;
-      if (!document.querySelector('#login-form')) render();
+      if (!document.querySelector('#login-form, #register-form')) render();
     } else if (force || !state.data) {
       if (!state.data) render();
       notice('Não foi possível atualizar o banco. Tente novamente.', true);
@@ -94,16 +94,23 @@ async function refresh(force = false) {
   }
 }
 function loginView() {
+  const register = state.authPage === 'register';
   return '<main class="login-layout"><section class="login-hero">' + brand +
     '<div class="login-message"><span class="eyebrow"><i></i> EXPERIÊNCIA DE SALA DE AULA</span>' +
     '<h1>Seu banco.<br>Na <em>prática.</em></h1><p>Aprenda a vender, pagar e cuidar do seu dinheiro.</p></div>' +
     '<div class="login-art"><div class="art-ring"></div><div class="art-card"><img src="/logo.svg" alt=""><span>BANCO VIRTUAL</span><b>Cartão Virtual</b><small>•••• &nbsp; ••••</small>' + icon('wifi') + '</div></div>' +
     '<div class="login-foot">FEITO PARA APRENDER <span>01 / BANCO VIRTUAL</span></div></section>' +
-    '<section class="login-content"><div class="login-box">' + brand + '<span class="tag">● &nbsp; SIMULAÇÃO EDUCACIONAL</span><h2>Bem-vindo!</h2>' +
-    '<p>Entre com o usuário que o gestor entregou a você.</p><form id="login-form">' +
-    '<label>Usuário<input name="username" placeholder="Seu nome de usuário" autocomplete="username" autocapitalize="none" required></label>' +
-    '<label>Senha<input type="password" name="password" placeholder="Sua senha" autocomplete="current-password" required></label>' +
-    '<p class="form-error" role="alert"></p><button class="btn primary login-submit">Entrar no banco' + icon('arrow') + '</button></form>' +
+    '<section class="login-content"><div class="login-box">' + brand + '<span class="tag">● &nbsp; SIMULAÇÃO EDUCACIONAL</span><h2>' + (register ? 'Abra sua conta' : 'Bem-vindo!') + '</h2>' +
+    '<p>' + (register ? 'Preencha seus dados para começar.' : 'Entre com seu usuário e senha.') + '</p><form id="' + (register ? 'register-form' : 'login-form') + '">' +
+    (register ? '<label>Nome<input name="name" placeholder="Seu nome" minlength="2" maxlength="70" autocomplete="name" required></label>' : '') +
+    '<label>Usuário<input name="username" placeholder="Seu nome de usuário" minlength="3" maxlength="40"' +
+    (register ? ' pattern="[a-zA-Z0-9._-]{3,40}" aria-describedby="username-help"' : '') + ' autocomplete="username" autocapitalize="none" spellcheck="false" required></label>' +
+    (register ? '<p id="username-help" class="field-help">Use letras sem acento, números, ponto, hífen ou sublinhado.</p>' : '') +
+    '<label>Senha<input type="password" name="password" placeholder="' + (register ? 'Pelo menos 8 caracteres' : 'Sua senha') + '"' +
+    (register ? ' minlength="8" maxlength="128"' : '') + ' autocomplete="' + (register ? 'new-password' : 'current-password') + '" required></label>' +
+    (register ? '<label>Confirmar senha<input type="password" name="confirmPassword" placeholder="Repita sua senha" minlength="8" maxlength="128" autocomplete="new-password" required></label>' : '') +
+    '<p class="form-error" role="alert"></p><button class="btn primary login-submit">' + (register ? 'Criar minha conta' : 'Entrar no banco') + icon('arrow') + '</button></form>' +
+    '<div class="login-switch">' + button(register ? 'Já tenho conta · Entrar' : 'Abrir conta', register ? 'sign-in' : 'open-account', null, 'ghost') + '</div>' +
     '<div class="login-note">' + icon('card') + '<span>Todos os saldos e pagamentos são fictícios.</span></div></div></section></main>';
 }
 
@@ -713,13 +720,17 @@ async function startCamera(b) {
 }
 
 document.addEventListener('submit', async e => {
-  if (e.target.id !== 'login-form') return;
+  if (e.target.id !== 'login-form' && e.target.id !== 'register-form') return;
   e.preventDefault();
   const form = e.target, submit = form.querySelector('button'), error = form.querySelector('.form-error');
   submit.disabled = true;
   error.textContent = '';
   try {
-    await api('/login', Object.fromEntries(new FormData(form)));
+    const data = Object.fromEntries(new FormData(form));
+    const register = form.id === 'register-form';
+    if (register && data.password !== data.confirmPassword) throw new Error('As senhas devem ser iguais.');
+    await api(register ? '/register' : '/login', { name: data.name, username: data.username, password: data.password });
+    state.authPage = 'login';
     state.page = 'overview';
     state.balance = true;
     await refresh(true);
@@ -728,8 +739,15 @@ document.addEventListener('submit', async e => {
 });
 document.addEventListener('click', async e => {
   const b = e.target.closest('[data-action]');
-  if (!b || !state.data) return;
+  if (!b) return;
   const { action, id } = b.dataset;
+  if (!state.data && (action === 'open-account' || action === 'sign-in')) {
+    state.authPage = action === 'open-account' ? 'register' : 'login';
+    render();
+    app.querySelector('form input')?.focus();
+    return;
+  }
+  if (!state.data) return;
   const { user, accounts = [], members = [], teams = [], devices } = state.data;
   try {
     switch (action) {

@@ -92,6 +92,31 @@ async function setup(config, t, memberCount = 3) {
   return { admin, session, students, team, credit };
 }
 
+test('cliente abre a própria conta, entra automaticamente e aparece para o gestor', async t => {
+  const { admin, session } = await setup({}, t, 1);
+  const client = session();
+  const registration = { name: '  Maria Oliveira  ', username: '  MARIA.OLIVEIRA  ', password: 'MinhaSenha2026' };
+  await client('/register', { ...registration, password: '1234' }, 400);
+  await client('/register', { ...registration, username: 'maria oliveira' }, 400);
+  await client('/register', { ...registration, role: 'admin', balance: 100000, card: 'AABBCCDD' }, 201);
+  const { user } = await client('/home');
+  assert.equal(user.name, 'Maria Oliveira');
+  assert.equal(user.username, 'maria.oliveira');
+  assert.equal(user.role, 'student');
+  assert.equal(user.balance, 0);
+  assert.equal(user.hasCard, 0);
+  assert.ok((await admin('/home')).accounts.some(account => account.id === user.id));
+  await client('/admin/balances/reset', {}, 403);
+  await session()('/register', registration, 409);
+  await client('/logout', {});
+  await client('/login', { username: 'maria.oliveira', password: registration.password });
+  assert.equal((await client('/home')).user.id, user.id);
+  const outcomes = await Promise.allSettled([session(), session()].map(request =>
+    request('/register', { ...registration, username: 'concorrente' }, 201)));
+  assert.equal(outcomes.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal((await admin('/home')).accounts.filter(account => account.username === 'concorrente').length, 1);
+});
+
 test('gestor edita dados e acessos sem recriar contas nem apagar movimentações', async t => {
   const { admin, students, team, credit, session } = await setup({}, t, 1);
   const [seller, replacement, , other] = students;
