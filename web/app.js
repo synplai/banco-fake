@@ -802,7 +802,9 @@ document.addEventListener('click', async e => {
       case 'credit': {
         if (!accounts.length) throw new Error('Cadastre um aluno ou um estabelecimento para liberar saldo.');
         const request = requestId();
+        const groups = new Map([['all', null], ['students', 'student'], ['teams', 'team']]);
         const options = [{ id: 'all', name: 'Todas as contas (alunos e estabelecimentos)' },
+          { id: 'students', name: 'Todos os clientes (alunos)' }, { id: 'teams', name: 'Todos os estabelecimentos' },
           ...accounts.map(x => ({ id: x.id, name: x.name + (x.role === 'team' ? ' · Estabelecimento' : ' · Aluno') }))];
         showDialog('Liberar saldo', 'O valor informado será creditado em cada conta selecionada.', form(
           select('Conta de destino', 'account', options, id) +
@@ -812,14 +814,17 @@ document.addEventListener('click', async e => {
         target.addEventListener('input', () => {
           const summary = target.querySelector('[data-credit-summary]');
           summary.textContent = '';
-          if (target.elements.account.value !== 'all') return;
-          try { summary.textContent = accounts.length + ' contas · Total de ' + money(cents(target.elements.value.value) * accounts.length); }
-          catch { summary.textContent = accounts.length + ' contas ativas.'; }
+          const selected = target.elements.account.value;
+          if (!groups.has(selected)) return;
+          const role = groups.get(selected);
+          const count = accounts.filter(account => !role || account.role === role).length;
+          try { summary.textContent = count + ' contas · Total de ' + money(cents(target.elements.value.value) * count); }
+          catch { summary.textContent = count + ' contas ativas.'; }
         });
         onForm(async data => {
           const result = await api('/admin/credit', { account: data.account, amount: cents(data.value), request });
           modal.close();
-          notice(data.account === 'all' ? 'Saldo liberado em ' + result.count + ' conta(s).' : 'Saldo liberado.');
+          notice(groups.has(data.account) ? 'Saldo liberado em ' + result.count + ' conta(s).' : 'Saldo liberado.');
           await refresh(true);
         });
         break;

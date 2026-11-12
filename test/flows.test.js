@@ -449,6 +449,31 @@ test('chaves Pix são reconhecidas, comprovantes são privados e devoluções s�
   await buyer.request('/pix/transfer', { ...transfer, request: randomBytes(16).toString('hex') }, 409);
 });
 
+test('gestor libera saldo apenas para clientes ou apenas para estabelecimentos', async t => {
+  const { admin, students: [seller, second], session, team } = await setup({}, t, 1);
+  await admin('/admin/students/' + second.id + '/delete', {});
+  const clients = { account: 'students', amount: 1000, request: randomBytes(16).toString('hex') };
+  await seller.request('/admin/credit', clients, 403);
+  assert.equal((await admin('/admin/credit', clients)).count, 3);
+  assert.equal((await admin('/admin/credit', clients)).count, 3);
+  const afterClients = await admin('/home');
+  assert.ok(afterClients.accounts.filter(account => account.role === 'student').every(account => account.balance === 1000));
+  assert.equal(afterClients.accounts.find(account => account.id === team.id).balance, 0);
+  const establishments = { account: 'teams', amount: 2000, request: randomBytes(16).toString('hex') };
+  await admin('/admin/credit', { ...clients, account: 'teams' }, 409);
+  assert.equal((await admin('/admin/credit', establishments)).count, 1);
+  assert.equal((await admin('/admin/credit', establishments)).count, 1);
+  assert.equal((await seller.request('/home')).user.balance, 1000);
+  assert.equal((await seller.request('/home')).teams[0].balance, 2000);
+  assert.equal((await admin('/home')).user.balance, 0);
+  const late = session();
+  await late('/register', { name: 'Nova cliente', username: 'nova.cliente', password: 'NovaSenha2026' }, 201);
+  await admin('/admin/credit', clients);
+  assert.equal((await late('/home')).user.balance, 0);
+  await admin('/admin/teams/delete-all', {});
+  await admin('/admin/credit', { ...establishments, request: randomBytes(16).toString('hex') }, 404);
+});
+
 test('crédito em todas as contas e cobranças fixas ou percentuais para CNPJ', async t => {
   const { admin, students, team, credit } = await setup({}, t, 1);
   const [seller, second, outsider] = students;

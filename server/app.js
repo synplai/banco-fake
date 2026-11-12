@@ -336,10 +336,12 @@ export async function createApp(db, config = process.env) {
     check(typeof account === 'string' && account.length, 'Selecione uma conta ou todas as contas.');
     check(typeof request === 'string' && /^[a-f0-9]{32}$/.test(request), 'Solicitação inválida.');
     const cents = amount(req.body.amount);
+    const groups = new Map([['all', null], ['students', 'student'], ['teams', 'team']]);
+    const batchCredit = groups.has(account);
     const count = await transaction(db, async db => {
-      const batch = await get(db, 'SELECT amount,recipients FROM credit_batches WHERE request=?', request);
+      const batch = await get(db, 'SELECT amount,recipients,scope FROM credit_batches WHERE request=?', request);
       if (batch) {
-        check(account === 'all' && batch.amount === cents, 'Este crédito já foi confirmado com outros dados.', 409);
+        check(batch.scope === account && batch.amount === cents, 'Este crédito já foi confirmado com outros dados.', 409);
         return batch.recipients;
       }
       const previous = await get(db, 'SELECT payee,amount FROM ledger WHERE request=?', request);
@@ -348,13 +350,16 @@ export async function createApp(db, config = process.env) {
         return 1;
       }
       const active = "SELECT id FROM accounts WHERE role IN ('student','team') AND deleted_at IS NULL";
-      const targets = account === 'all' ? await all(db, active) : await all(db, active + ' AND id=?', account);
+      let targets;
+      if (!batchCredit) targets = await all(db, active + ' AND id=?', account);
+      else if (groups.get(account)) targets = await all(db, active + ' AND role=?', groups.get(account));
+      else targets = await all(db, active);
       check(targets.length, 'Nenhuma conta ativa selecionada.', 404);
       for (const target of targets) {
         await transfer(db, { payee: target.id, amount: cents, method: 'credit', actor: req.user.id,
-          request: account === 'all' ? null : request });
+          request: batchCredit ? null : request });
       }
-      if (account === 'all') await run(db, 'INSERT INTO credit_batches VALUES (?,?,?)', request, cents, targets.length);
+      if (batchCredit) await run(db, 'INSERT INTO credit_batches (request,amount,recipients,scope) VALUES (?,?,?,?)', request, cents, targets.length, account);
       return targets.length;
     });
     res.json({ ok: true, count });
